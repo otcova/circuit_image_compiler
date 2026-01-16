@@ -27,7 +27,7 @@ fn main() {
 
 struct MyEguiApp {
     tex_image: glow::NativeTexture,
-    tex_labels: glow::NativeTexture,
+    tex_nets: glow::NativeTexture,
     circuit: CircuitImage,
     cursor: (u32, u32),
 
@@ -73,7 +73,7 @@ impl MyEguiApp {
             texture
         };
 
-        let tex_labels = unsafe {
+        let tex_nets = unsafe {
             let texture = gl.create_texture().unwrap();
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
 
@@ -94,7 +94,7 @@ impl MyEguiApp {
                 0,
                 glow::RED_INTEGER,
                 glow::UNSIGNED_INT,
-                glow::PixelUnpackData::Slice(Some(bytemuck::cast_slice(&circuit.labels))),
+                glow::PixelUnpackData::Slice(Some(bytemuck::cast_slice(&circuit.nets))),
             );
             texture
         };
@@ -114,7 +114,7 @@ impl MyEguiApp {
 
         Self {
             tex_image,
-            tex_labels,
+            tex_nets,
             circuit,
             cursor: (0, 0),
             program,
@@ -136,12 +136,16 @@ impl eframe::App for MyEguiApp {
                     .show(ui, |ui| {
                         let (x, y) = self.cursor;
                         ui.strong(format!("pos:   {x}, {y}"));
-                        ui.strong(format!("label: {}", self.circuit.get_label(x, y)));
-                        ui.strong(format!("color: {:?}", self.circuit.image.get_pixel(x, y)));
+                        ui.strong(format!("net: {}", self.circuit.get_net(x, y)));
+
+                        let color = *self.circuit.image.get_pixel(x, y);
+                        ui.strong(format!("color: {color:?}"));
+                        ui.strong(format!("saturation: {:.0}%", 100. * saturation(color)));
+                        ui.strong(format!("value: {:.0}%", 100. * value(color)));
 
                         ui.separator();
 
-                        ui.strong(format!("label count: {:?}", self.circuit.label_count));
+                        ui.strong(format!("net count: {:?}", self.circuit.net_count));
                     });
             });
 
@@ -184,8 +188,8 @@ impl MyEguiApp {
         let program = self.program;
         let vertex_array = self.vertex_array;
         let tex_image = self.tex_image;
-        let tex_labels = self.tex_labels;
-        let target_label = self.circuit.get_label(self.cursor.0, self.cursor.1);
+        let tex_nets = self.tex_nets;
+        let target_net = self.circuit.get_net(self.cursor.0, self.cursor.1);
 
         let callback = PaintCallback {
             rect,
@@ -205,9 +209,9 @@ impl MyEguiApp {
                         0,
                     );
                     gl.active_texture(glow::TEXTURE1);
-                    gl.bind_texture(glow::TEXTURE_2D, Some(tex_labels));
+                    gl.bind_texture(glow::TEXTURE_2D, Some(tex_nets));
                     gl.uniform_1_i32(
-                        Some(&gl.get_uniform_location(program, "tex_labels").unwrap()),
+                        Some(&gl.get_uniform_location(program, "tex_nets").unwrap()),
                         1,
                     );
 
@@ -218,8 +222,8 @@ impl MyEguiApp {
                     );
 
                     gl.uniform_1_u32(
-                        Some(&gl.get_uniform_location(program, "target_label").unwrap()),
-                        target_label,
+                        Some(&gl.get_uniform_location(program, "target_net").unwrap()),
+                        target_net,
                     );
 
                     gl.bind_vertex_array(Some(vertex_array));

@@ -1,22 +1,61 @@
+use std::collections::HashSet;
+
 use image::{ImageBuffer, Rgb};
 
 pub struct CircuitImage {
     pub image: ImageBuffer<Rgb<u8>, Vec<u8>>,
-    pub labels: Vec<u32>,
-    pub label_count: u32,
+    pub nets: Vec<u32>,
+    pub net_count: u32,
+}
+
+pub fn value(pixel: Rgb<u8>) -> f32 {
+    let (r, g, b) = (pixel[0], pixel[1], pixel[2]);
+    r.max(g).max(b) as f32 / 255.0
+}
+
+pub fn saturation(pixel: Rgb<u8>) -> f32 {
+    let (r, g, b) = (pixel[0], pixel[1], pixel[2]);
+
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+
+    if max == 0 {
+        0.0
+    } else {
+        delta as f32 / max as f32
+    }
+}
+
+pub fn is_background(c: Rgb<u8>) -> bool {
+    // saturation(c) <= 0.15
+    value(c) <= 0.15
+}
+
+pub fn is_active(c: Rgb<u8>) -> bool {
+    Rgb::<u8>([0, 166, 47]) == c
+}
+
+pub fn is_passive(c: Rgb<u8>) -> bool {
+    Rgb::<u8>([0, 80, 152]) == c
+}
+
+pub fn is_power(c: Rgb<u8>) -> bool {
+    Rgb::<u8>([220, 20, 20]) == c
 }
 
 impl CircuitImage {
     pub fn new(image: ImageBuffer<Rgb<u8>, Vec<u8>>) -> CircuitImage {
-        let ignore_color = Rgb::<u8>([25, 3, 58]);
-        let glue_color = Rgb::<u8>([56, 174, 11]);
+        // const LABEL_BACKGROUND: u32 = 0;
+        const LABEL_POWER: u32 = 1;
 
         let mut intersection_coords = Vec::new();
+        let mut net_aliases = UnionFind::new(2); // background & power nets
 
-        // --- Create lables by color & glue ---
+        // --- Create lables by color & power ---
 
         let (width, height) = (image.width(), image.height());
-        let mut labels = vec![0; width as usize * height as usize];
+        let mut nets = vec![0; width as usize * height as usize];
         let get_index = |x: u32, y: u32| y as usize * width as usize + x as usize;
 
         let neighbors_4 = |x: u32, y: u32| {
@@ -28,63 +67,72 @@ impl CircuitImage {
             ]
         };
 
-        let mut current_label: u32 = 0;
         let mut dfs_stack = Vec::with_capacity(u32::min(width, height) as usize);
 
         for y in 0..height {
             for x in 0..width {
-                if labels[get_index(x, y)] != 0 {
+                if nets[get_index(x, y)] != 0 {
                     continue;
                 }
 
-                let start_color = *image.get_pixel(x, y);
-                if start_color == ignore_color {
+                let current_color = *image.get_pixel(x, y);
+                if is_background(current_color) {
                     continue;
                 }
 
                 // Start New Blob
-                current_label = current_label.strict_add(1);
-                labels[get_index(x, y)] = current_label;
+                let current_net = if is_power(current_color) {
+                    LABEL_POWER
+                } else {
+                    net_aliases.new_net()
+                };
+                nets[get_index(x, y)] = current_net;
                 dfs_stack.push((x, y));
 
                 while let Some((x, y)) = dfs_stack.pop() {
-                    // We need the color of the current pixel to determine connectivity
                     let current_color = *image.get_pixel(x, y);
+                    // let current_is_gate = is_active(current_color) || is_passive(current_color);
+                    let current_is_power = is_power(current_color);
 
                     for (nx, ny) in neighbors_4(x, y).into_iter().flatten() {
                         let neighbor_color = *image.get_pixel(nx, ny);
-                        if neighbor_color == ignore_color {
+                        if is_background(neighbor_color) {
                             continue;
                         }
 
-                        let neighbor_label = labels[get_index(nx, ny)];
+                        let neighbor_net = nets[get_index(nx, ny)];
+                        if current_net == neighbor_net {
+                            continue; // Already visited
+                        }
 
-                        // touches color || touches glue || is glue?
-                        let is_connected = (current_color == neighbor_color)
-                            || (current_color == glue_color)
-                            || (neighbor_color == glue_color);
+                        let is_glued = current_is_power || is_power(neighbor_color);
 
-                        if !is_connected {
-                            // Touching another wire? Store it to check it later on.
-                            if neighbor_label != current_label {
-                                intersection_coords.push(((x, y), (nx, ny)));
+                        // If neighbor connected, check it recursively
+                        if current_color == neighbor_color || is_glued {
+                            if neighbor_net == 0 {
+                                if is_power(neighbor_color) {
+                                    net_aliases.alias(current_net, LABEL_POWER);
+                                }
+
+                                nets[get_index(nx, ny)] = current_net;
+                                dfs_stack.push((nx, ny));
                             }
                             continue;
                         }
 
-                        if neighbor_label == 0 {
-                            labels[get_index(nx, ny)] = current_label;
-                            dfs_stack.push((nx, ny));
+                        // Touching another wire? Store it to check it later on.
+                        if !is_glued {
+                            intersection_coords.push(((x, y), (nx, ny)));
                         }
                     }
                 }
             }
         }
 
-        // --- Detect wire intersections ---
-        let mut border_line = Vec::new();
+        // --- Solve wire intersections ---
+        let mut border_pixels = Vec::new();
 
-        let mut label_mapping: Vec<_> = (0..=current_label).collect();
+        let mut intersections = HashSet::new();
 
         let mut border_visited = vec![0_u32; width as usize * height as usize];
 
@@ -105,16 +153,11 @@ impl CircuitImage {
         };
 
         for ((first_x, first_y), (first_nx, first_ny)) in intersection_coords {
-            let current_label = labels[get_index(first_x, first_y)];
-            let intersect_label = labels[get_index(first_nx, first_ny)];
+            let current_net = nets[get_index(first_x, first_y)];
+            let intersect_net = nets[get_index(first_nx, first_ny)];
 
-            if border_visited[get_index(first_x, first_y)] == current_label {
+            if border_visited[get_index(first_nx, first_ny)] == current_net {
                 continue;
-            }
-
-            // TODO: find root
-            if label_mapping[current_label as usize] == label_mapping[intersect_label as usize] {
-                continue; // Skip intersections connected somewhere else
             }
 
             let current_color = *image.get_pixel(first_x, first_y);
@@ -123,7 +166,7 @@ impl CircuitImage {
             let (mut slope_x, mut slope_y) = (0., 0.);
 
             let border_slope = |x: u32, y: u32| {
-                if *image.get_pixel(x, y) != current_color {
+                if nets[get_index(x, y)] != intersect_net {
                     return None;
                 }
                 let (mut slope_x, mut slope_y) = (0_f32, 0_f32);
@@ -131,10 +174,10 @@ impl CircuitImage {
                 for (nx, ny) in neighbors_4(x, y)
                     .into_iter()
                     .flatten()
-                    .filter(|&(nx, ny)| *image.get_pixel(nx, ny) == intersect_color)
+                    .filter(|&(nx, ny)| nets[get_index(nx, ny)] == current_net)
                 {
-                    slope_x += (nx as i64 - x as i64) as f32;
-                    slope_y += (ny as i64 - y as i64) as f32;
+                    slope_x += (x as i64 - nx as i64) as f32;
+                    slope_y += (y as i64 - ny as i64) as f32;
                     count += 1.;
                 }
                 if count == 0. {
@@ -144,22 +187,23 @@ impl CircuitImage {
                 }
             };
 
-            let Some((sx, sy)) = border_slope(first_x, first_y) else {
+            if let Some((sx, sy)) = border_slope(first_nx, first_ny) {
+                slope_x += sx;
+                slope_y += sy;
+            } else {
                 continue;
             };
-            slope_x += sx;
-            slope_y += sy;
 
-            border_visited[get_index(first_x, first_y)] = current_label;
-            dfs_stack.push((first_x, first_y));
+            border_visited[get_index(first_nx, first_ny)] = current_net;
+            dfs_stack.push((first_nx, first_ny));
 
-            // 1. Scan border pixels
-            border_line.clear();
+            // 1. Find border pixels
+            border_pixels.clear();
             while let Some((x, y)) = dfs_stack.pop() {
-                border_line.push((x, y));
+                border_pixels.push((x, y));
 
                 for (nx, ny) in neighbors_8(x, y).into_iter().flatten() {
-                    if border_visited[get_index(nx, ny)] == current_label {
+                    if border_visited[get_index(nx, ny)] == current_net {
                         continue;
                     }
 
@@ -167,15 +211,15 @@ impl CircuitImage {
                         slope_x += sx;
                         slope_y += sy;
 
-                        border_visited[get_index(nx, ny)] = current_label;
+                        border_visited[get_index(nx, ny)] = current_net;
                         dfs_stack.push((nx, ny));
                     }
                 }
             }
 
             // Intersection limits
-            let min_slope = border_line.len() / 4;
-            let max_intersaction_length = 16 + 16 * border_line.len();
+            let min_slope = border_pixels.len() / 4;
+            let max_intersection_length = 64 * border_pixels.len();
 
             if slope_x.abs() + slope_y.abs() < min_slope as f32 {
                 continue;
@@ -188,48 +232,48 @@ impl CircuitImage {
                 slope_y /= slope_x.abs();
                 slope_x = slope_x.signum();
             } else if slope_x == 0. && slope_y == 0. {
+                // Ignore ambiguous circle-shaped border
                 continue;
             } else {
                 slope_x = slope_x.signum();
                 slope_y = slope_y.signum();
             }
 
-            // println!(
-            //     "[I {current_label}] points: {}   slope: {slope_x}, {slope_y}",
-            //     border_line.len()
-            // );
-            // println!("  {:?}", &border_line);
+            // 2. Check ~90deg angle in surroundings of intersection
+            // TODO
 
-            // 2. Advance border points until crossing the intersected wire
-            while let Some((x, y)) = border_line.pop() {
+            // 3. Advance border points until exiting the intersected wire
+            while let Some((x, y)) = border_pixels.pop() {
                 let (mut pre_x, mut pre_y) = (x, y);
 
-                for i in 1..=max_intersaction_length {
-                    let rx = (x as i64 + (slope_x * i as f32) as i64) as u32;
-                    let ry = (y as i64 + (slope_y * i as f32) as i64) as u32;
+                for i in 1..=max_intersection_length {
+                    let rx = x as i64 + (slope_x * i as f32) as i64;
+                    let ry = y as i64 + (slope_y * i as f32) as i64;
+
+                    if rx < 0 || width as i64 <= rx || ry < 0 || height as i64 <= ry {
+                        break;
+                    }
+
+                    let (rx, ry) = (rx as u32, ry as u32);
 
                     // If we are going in a diagonal, check connection before continuing
                     let mut ray_ended = false;
 
                     let mut ray_hit = |x: u32, y: u32| {
                         let color = *image.get_pixel(x, y);
-                        let label = labels[get_index(x, y)];
+                        let net = nets[get_index(x, y)];
 
                         if color != intersect_color {
                             ray_ended = true;
                         }
 
-                        // If hit, connect wires "current_label" and "label"
-                        if color == current_color && label != current_label {
-                            // todo: search the real root !!!
-                            let resolved_label = label_mapping[label as usize];
-                            let resolved_current_label = label_mapping[current_label as usize];
-                            if resolved_label != resolved_current_label {
-                                let min = u32::min(resolved_label, resolved_current_label);
-                                label_mapping[resolved_label as usize] = min;
-                                label_mapping[resolved_current_label as usize] = min;
-                                label_mapping[label as usize] = min;
-                                label_mapping[current_label as usize] = min;
+                        // If hit, connect wires "current_net" and "net"
+                        if color == current_color && current_net != net {
+                            let is_new_alias = intersections.insert((current_net, net));
+
+                            // If alias both ways, connect wires
+                            if is_new_alias && intersections.contains(&(net, current_net)) {
+                                net_aliases.alias(current_net, net);
                             }
                         }
                     };
@@ -249,40 +293,94 @@ impl CircuitImage {
             }
         }
 
-        // --- Merge labels of intersecting wires ---
-        // Resove backwards dependencies
-        for i in 0..label_mapping.len() {
-            label_mapping[i] = label_mapping[label_mapping[i] as usize];
-        }
-
-        // Compact labels
-        {
-            // TODO use label_mapping[..i] as memory
-            let mut compact_mapping: Vec<_> = (0..label_mapping.len() as u32).collect();
-            current_label = 0;
-            for i in 1..label_mapping.len() {
-                if label_mapping[i] == i as u32 {
-                    current_label += 1;
-                    compact_mapping[i] = current_label;
-                }
-                // todo: change
-                label_mapping[i] = compact_mapping[label_mapping[i] as usize];
-            }
-        }
-
-        // Update labels
-        for label in &mut labels {
-            *label = label_mapping[*label as usize];
+        // Merge nets of intersecting wires
+        let net_count = net_aliases.compact();
+        for net in &mut nets {
+            *net = net_aliases.parent(*net);
         }
 
         CircuitImage {
             image,
-            labels,
-            label_count: current_label,
+            nets,
+            net_count: net_count - 1,
         }
     }
 
-    pub fn get_label(&self, x: u32, y: u32) -> u32 {
-        self.labels[y as usize * self.image.width() as usize + x as usize]
+    pub fn get_net(&self, x: u32, y: u32) -> u32 {
+        self.nets[y as usize * self.image.width() as usize + x as usize]
     }
+}
+
+struct UnionFind {
+    // Invariant: aliases[i] <= i
+    aliases: Vec<u32>,
+}
+
+impl UnionFind {
+    pub fn new(net_count: u32) -> UnionFind {
+        UnionFind {
+            aliases: (0..net_count).collect(),
+        }
+    }
+
+    pub fn new_net(&mut self) -> u32 {
+        let i = u32::try_from(self.aliases.len()).unwrap();
+        self.aliases.push(i);
+        i
+    }
+
+    /// Finds the root and compresses the path to it by half
+    pub fn root(&mut self, mut i: u32) -> u32 {
+        while i != self.aliases[i as usize] {
+            let parent = self.aliases[i as usize];
+            let grandparent = self.aliases[parent as usize];
+
+            self.aliases[i as usize] = grandparent;
+            i = grandparent;
+        }
+        i
+    }
+
+    pub fn parent(&mut self, i: u32) -> u32 {
+        self.aliases[i as usize]
+    }
+
+    /// Return the root of the resulting alias
+    pub fn alias(&mut self, a: u32, b: u32) -> u32 {
+        let root_a = self.root(a);
+        let root_b = self.root(b);
+
+        if root_a < root_b {
+            self.aliases[root_b as usize] = root_a;
+            root_a
+        } else {
+            self.aliases[root_a as usize] = root_b;
+            root_b
+        }
+    }
+
+    /// Resolves dependencies, and removes holes
+    /// (meaning that all roots will be contiguous from 0 to root_count)
+    ///
+    /// Returns the amount of disctinct roots.
+    pub fn compact(&mut self) -> u32 {
+        let mut root_count = 0;
+        for i in 0..self.aliases.len() {
+            if self.aliases[i] == i as u32 {
+                self.aliases[i] = root_count;
+                root_count += 1;
+            } else {
+                self.aliases[i] = self.aliases[self.aliases[i] as usize];
+            }
+        }
+        root_count
+    }
+
+    // /// Resove the backwards dependencies.
+    // /// After this call, for all i: parent(i) == root(i)
+    // pub fn flatten(&mut self) {
+    //     for i in 0..self.aliases.len() {
+    //         self.aliases[i] = self.aliases[self.aliases[i] as usize];
+    //     }
+    // }
 }
