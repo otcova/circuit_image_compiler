@@ -28,7 +28,7 @@ impl CircuitImage {
             ]
         };
 
-        let mut current_blob_id: u32 = 1;
+        let mut current_label: u32 = 0;
         let mut dfs_stack = Vec::with_capacity(u32::min(width, height) as usize);
 
         for y in 0..height {
@@ -43,14 +43,13 @@ impl CircuitImage {
                 }
 
                 // Start New Blob
-                labels[get_index(x, y)] = current_blob_id;
+                current_label = current_label.strict_add(1);
+                labels[get_index(x, y)] = current_label;
                 dfs_stack.push((x, y));
 
                 while let Some((x, y)) = dfs_stack.pop() {
                     // We need the color of the current pixel to determine connectivity
                     let current_color = *image.get_pixel(x, y);
-                    let mut intersection_color = None;
-                    let mut multiple_intersection = false;
 
                     for (nx, ny) in neighbors_4(x, y).into_iter().flatten() {
                         let neighbor_color = *image.get_pixel(nx, ny);
@@ -58,41 +57,37 @@ impl CircuitImage {
                             continue;
                         }
 
-                        // Touches same color or glue or is glue
+                        let neighbor_label = labels[get_index(nx, ny)];
+
+                        // touches color || touches glue || is glue?
                         let is_connected = (current_color == neighbor_color)
                             || (current_color == glue_color)
                             || (neighbor_color == glue_color);
 
-                        if is_connected {
-                            if labels[get_index(nx, ny)] == 0 {
-                                labels[get_index(nx, ny)] = current_blob_id;
-                                dfs_stack.push((nx, ny));
-                                continue;
+                        if !is_connected {
+                            // Touching another wire? Store it to check it later on.
+                            if neighbor_label != current_label {
+                                intersection_coords.push(((x, y), (nx, ny)));
                             }
-                        } else if !multiple_intersection {
-                            if intersection_color.is_some() {
-                                multiple_intersection = true;
-                            } else {
-                                intersection_color = Some(neighbor_color);
-                            }
+                            continue;
+                        }
+
+                        if neighbor_label == 0 {
+                            labels[get_index(nx, ny)] = current_label;
+                            dfs_stack.push((nx, ny));
                         }
                     }
-
-                    if !multiple_intersection && let Some(ncolor) = intersection_color {
-                        intersection_coords.push((x, y, ncolor));
-                    }
                 }
-
-                current_blob_id = current_blob_id.strict_add(1);
             }
         }
 
         // --- Detect wire intersections ---
         let mut border_line = Vec::new();
 
-        let mut label_mapping: Vec<_> = (0..current_blob_id).collect();
+        let mut label_mapping: Vec<_> = (0..=current_label).collect();
 
-        let mut border_visited = vec![false; width as usize * height as usize];
+        let mut border_visited = vec![0_u32; width as usize * height as usize];
+
         let neighbors_8 = |x: u32, y: u32| {
             let (x0, x1) = (0 < x, x + 1 < width);
             let (y0, y1) = (0 < y, y + 1 < height);
@@ -109,13 +104,21 @@ impl CircuitImage {
             ]
         };
 
-        for (x, y, intersect_color) in intersection_coords {
-            let current_label = labels[get_index(x, y)];
-            if border_visited[get_index(x, y)] {
+        for ((first_x, first_y), (first_nx, first_ny)) in intersection_coords {
+            let current_label = labels[get_index(first_x, first_y)];
+            let intersect_label = labels[get_index(first_nx, first_ny)];
+
+            if border_visited[get_index(first_x, first_y)] == current_label {
                 continue;
             }
 
-            let current_color = *image.get_pixel(x, y);
+            // TODO: find root
+            if label_mapping[current_label as usize] == label_mapping[intersect_label as usize] {
+                continue; // Skip intersections connected somewhere else
+            }
+
+            let current_color = *image.get_pixel(first_x, first_y);
+            let intersect_color = *image.get_pixel(first_nx, first_ny);
 
             let (mut slope_x, mut slope_y) = (0., 0.);
 
@@ -141,22 +144,22 @@ impl CircuitImage {
                 }
             };
 
-            let Some((sx, sy)) = border_slope(x, y) else {
+            let Some((sx, sy)) = border_slope(first_x, first_y) else {
                 continue;
             };
             slope_x += sx;
             slope_y += sy;
 
-            border_visited[get_index(x, y)] = true;
-            dfs_stack.push((x, y));
+            border_visited[get_index(first_x, first_y)] = current_label;
+            dfs_stack.push((first_x, first_y));
 
-            // 1. Scan border line
+            // 1. Scan border pixels
             border_line.clear();
             while let Some((x, y)) = dfs_stack.pop() {
                 border_line.push((x, y));
 
                 for (nx, ny) in neighbors_8(x, y).into_iter().flatten() {
-                    if border_visited[get_index(nx, ny)] {
+                    if border_visited[get_index(nx, ny)] == current_label {
                         continue;
                     }
 
@@ -164,7 +167,7 @@ impl CircuitImage {
                         slope_x += sx;
                         slope_y += sy;
 
-                        border_visited[get_index(nx, ny)] = true;
+                        border_visited[get_index(nx, ny)] = current_label;
                         dfs_stack.push((nx, ny));
                     }
                 }
@@ -254,12 +257,13 @@ impl CircuitImage {
 
         // Compact labels
         {
-            let mut compact_mapping: Vec<_> = (0..current_blob_id).collect();
-            current_blob_id = 0;
-            for i in 0..label_mapping.len() {
+            // TODO use label_mapping[..i] as memory
+            let mut compact_mapping: Vec<_> = (0..label_mapping.len() as u32).collect();
+            current_label = 0;
+            for i in 1..label_mapping.len() {
                 if label_mapping[i] == i as u32 {
-                    compact_mapping[i] = current_blob_id;
-                    current_blob_id += 1;
+                    current_label += 1;
+                    compact_mapping[i] = current_label;
                 }
                 // todo: change
                 label_mapping[i] = compact_mapping[label_mapping[i] as usize];
@@ -274,7 +278,7 @@ impl CircuitImage {
         CircuitImage {
             image,
             labels,
-            label_count: current_blob_id - 1,
+            label_count: current_label,
         }
     }
 
