@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use eframe::{
-    egui::{self, PaintCallback, PointerButton, Sense, Ui, Vec2},
+    egui::{self, Key, PaintCallback, PointerButton, Sense, Ui, Vec2},
     egui_glow,
     glow::{self, HasContext},
 };
@@ -39,7 +39,7 @@ impl MyEguiApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let gl = cc.gl.as_ref().expect("Glow backend is needed");
 
-        let img = ImageReader::open("circuit.png")
+        let img = ImageReader::open("circuits/test.png")
             .unwrap()
             .decode()
             .unwrap()
@@ -125,6 +125,11 @@ impl MyEguiApp {
 
 impl eframe::App for MyEguiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
         egui::SidePanel::left("left_bar")
             .resizable(false)
             .show(ctx, |ui| {

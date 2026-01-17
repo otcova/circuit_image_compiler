@@ -33,14 +33,21 @@ void main() {
     out_color = texture(tex_circuit, uv);
 
     if (target_net > 0u) {
-        if (target_net == net)
-            out_color = out_color * 1.3;
+        if (target_net == net) {
+            // ivec2 p = ivec2(gl_FragCoord);
+            // // if (p.x % 2 == 0 && p.y % 2 == 0) 
+            // // if ((p.x + p.y / 2) % 2 == 0 && p.y % 2 == 0) 
+            // if (p.x % 2 == p.y % 2)
+            //     out_color.rgb += vec3(0.5);
+            // else
+                out_color.rgb = out_color.rgb * 2.0;
+        }
         else if (target_net == n0 || target_net == n1
               || target_net == n2 || target_net == n3
               || target_net == n4 || target_net == n5
               || target_net == n6 || target_net == n7)
             out_color = vec4(255);
-        else if (net > 0u)
-            out_color.rgb *= 0.5;
+        // else if (net > 0u)
+        //     out_color.rgb *= 0.5;
     }
 }
