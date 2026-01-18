@@ -8,3 +8,4 @@ eframe = "0.33" # UI
 egui_extras = { version = "0.33", features = ["image"] } # UI Image support
 image = "0.25" # Image support
 bytemuck = "1.24" # Cast to bytes
+smallvec = "1.15" # Vec in stack if len < N

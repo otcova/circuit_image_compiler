@@ -20,7 +20,7 @@ fn main() {
         ..Default::default()
     };
     eframe::run_native(
-        "My egui App",
+        "Painting comes alive",
         options,
         Box::new(|cc| Ok(Box::new(MyEguiApp::new(cc)))),
     )
@@ -31,7 +31,7 @@ struct MyEguiApp {
     tex_image: glow::NativeTexture,
     tex_nets: glow::NativeTexture,
     circuit: Circuit,
-    cursor: (u32, u32),
+    cursor: Option<(u32, u32)>,
 
     program: glow::Program,
     vertex_array: glow::VertexArray,
@@ -44,6 +44,7 @@ impl MyEguiApp {
         let gl = cc.gl.as_ref().expect("Glow backend is needed");
 
         let img = ImageReader::open("circuits/test.png")
+            // let img = ImageReader::open("circuits/playground.png")
             .unwrap()
             .decode()
             .unwrap()
@@ -114,7 +115,7 @@ impl MyEguiApp {
             tex_image,
             tex_nets,
             circuit,
-            cursor: (0, 0),
+            cursor: None,
             program,
             vertex_array,
             camera,
@@ -139,19 +140,33 @@ impl eframe::App for MyEguiApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
-                        let (x, y) = self.cursor;
-                        ui.strong(format!("pos:   {x}, {y}"));
+                        if let Some((x, y)) = self.cursor {
+                            ui.strong(format!("pos:   {x}, {y}"));
 
-                        let pixel = self.circuit.image.pixel(x, y);
-                        ui.strong(format!("gate type: {:?}", pixel.gate_type()));
-                        ui.strong(format!("color: {:?}", pixel.wire_color()));
-                        ui.strong(format!("net: {:?}", pixel.net()));
+                            let pixel = self.circuit.image.pixel(x, y);
+                            if let Some(net) = pixel.net() {
+                                ui.strong(format!("net: {:?}", net));
 
-                        let color = *self.circuit.image.colors().get_pixel(x, y);
-                        ui.strong(format!("saturation: {:.0}%", 100. * hsv_saturation(color)));
-                        ui.strong(format!("value: {:.0}%", 100. * hsv_value(color)));
+                                if let Some(gate) = self.circuit.get_gate(net) {
+                                    ui.strong(format!("gate type: {:?}", gate.ty));
+                                    ui.strong(format!("gate inputs: {:?}", gate.inputs));
+                                    ui.strong(format!("gate outputs: {:?}", gate.outputs));
+                                }
+                            }
 
-                        ui.separator();
+                            if let Some(&color) =
+                                self.circuit.image.colors().get_pixel_checked(x, y)
+                            {
+                                ui.strong(format!("color: {:?}", color));
+                                ui.strong(format!(
+                                    "saturation: {:.0}%",
+                                    100. * hsv_saturation(color)
+                                ));
+                                ui.strong(format!("value: {:.0}%", 100. * hsv_value(color)));
+                            }
+
+                            ui.separator();
+                        }
 
                         ui.strong(format!("net count: {:?}", self.circuit.net_count()));
                     });
@@ -176,10 +191,9 @@ impl eframe::App for MyEguiApp {
 
 impl MyEguiApp {
     fn custom_painting(&mut self, ui: &mut Ui) {
-        let tex_size = Vec2::new(
-            self.circuit.image.width() as f32,
-            self.circuit.image.height() as f32,
-        );
+        let (width, height) = (self.circuit.image.width(), self.circuit.image.height());
+        let tex_size = Vec2::new(width as f32, height as f32);
+
         let surface_size = ui.available_size();
 
         let (rect, response) = ui.allocate_exact_size(surface_size, Sense::drag());
@@ -210,7 +224,12 @@ impl MyEguiApp {
                 let local_pos = pointer_pos - response.rect.min;
 
                 let texel = self.camera.surface_to_texel(local_pos, surface_size);
-                self.cursor = (texel.x as u32, texel.y as u32);
+                let (x, y) = (texel.x as u32, texel.y as u32);
+                if texel.x < 0. || texel.y < 0. || width <= x || height <= y {
+                    self.cursor = None;
+                } else {
+                    self.cursor = Some((x, y));
+                }
             }
             if response.dragged_by(PointerButton::Secondary) {
                 self.camera.position -=
@@ -229,7 +248,11 @@ impl MyEguiApp {
         let vertex_array = self.vertex_array;
         let tex_image = self.tex_image;
         let tex_nets = self.tex_nets;
-        let target_net = self.circuit.image.net_at(self.cursor.0, self.cursor.1);
+
+        let target_net = self
+            .cursor
+            .and_then(|(x, y)| self.circuit.image.pixel(x, y).net())
+            .unwrap_or(0);
 
         let callback = PaintCallback {
             rect,
@@ -264,11 +287,11 @@ impl MyEguiApp {
                         uv_size.y,
                     );
 
-                    let pixel_size = uv_size.x / surface_size.x;
+                    let pixel_size = uv_size / surface_size;
                     gl.uniform_2_f32(
                         Some(&gl.get_uniform_location(program, "pixel_size").unwrap()),
-                        pixel_size.max(0.25 / surface_size.x),
-                        pixel_size.max(0.25 / surface_size.y),
+                        pixel_size.x,
+                        pixel_size.y,
                     );
 
                     gl.uniform_1_u32(
@@ -283,6 +306,7 @@ impl MyEguiApp {
         };
         ui.painter().add(callback);
     }
+
     fn init_shadersnew(gl: &glow::Context) -> (glow::Program, glow::VertexArray) {
         let shader_version = if cfg!(target_arch = "wasm32") {
             "#version 300 es"

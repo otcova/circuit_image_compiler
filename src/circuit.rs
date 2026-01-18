@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use image::{ImageBuffer, Rgb};
+use smallvec::SmallVec;
 
 // Permanent unconditional off
 const NET_OFF: u32 = 0;
@@ -10,8 +11,8 @@ const NET_ON: u32 = 1;
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum GateType {
+    Passive,
     Active,
-    Pasive,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -51,8 +52,28 @@ impl Pixel {
     }
 }
 
+#[derive(Clone)]
+pub struct Gate {
+    pub ty: GateType,
+    /// Gate-Gate contacts
+    pub inputs: SmallVec<[u32; 4]>,
+    /// Gate-Wire contacts
+    pub outputs: SmallVec<[u32; 4]>,
+}
+
+impl Gate {
+    pub fn new(ty: GateType) -> Gate {
+        Gate {
+            ty,
+            inputs: SmallVec::new(),
+            outputs: SmallVec::new(),
+        }
+    }
+}
+
 pub struct Circuit {
     pub image: CircuitImage,
+    gates: Vec<Option<Gate>>,
 }
 
 pub struct CircuitImage {
@@ -98,13 +119,15 @@ impl CircuitImage {
         self.colors.height()
     }
 
-    pub fn net_at(&self, x: u32, y: u32) -> u32 {
+    fn net_at(&self, x: u32, y: u32) -> u32 {
         let index = x as usize + y as usize * self.width() as usize;
         self.nets[index]
     }
 
     pub fn pixel(&self, x: u32, y: u32) -> Pixel {
-        let color = *self.colors.get_pixel(x, y);
+        let Some(&color) = self.colors.get_pixel_checked(x, y) else {
+            return Pixel::Insulator;
+        };
         let index = x as usize + y as usize * self.width() as usize;
 
         if hsv_value(color) <= 0.15 {
@@ -116,7 +139,7 @@ impl CircuitImage {
             }
         } else if Rgb::<u8>([0, 80, 152]) == color {
             Pixel::Gate {
-                ty: GateType::Pasive,
+                ty: GateType::Passive,
                 net: self.nets[index],
             }
         } else if Rgb::<u8>([220, 20, 20]) == color {
@@ -152,33 +175,41 @@ pub fn hsv_saturation(pixel: Rgb<u8>) -> f32 {
 
 impl Circuit {
     pub fn new(colors: ImageBuffer<Rgb<u8>, Vec<u8>>) -> Circuit {
+        // Try Optimize: Check if this is relevant
+        const INIT_CAPACITY: usize = 64;
+
         let mut image = CircuitImage::new(colors);
         const NET_UNVISITED: u32 = NET_OFF;
+        let (width, height) = (image.width(), image.height());
+
+        // A non-sparse map from net (u32) to Gate
+        let mut gates = Vec::with_capacity(INIT_CAPACITY);
 
         let mut net_aliases = UnionFind::new(2); // OFF and ON nets
 
-        let mut bridge_start_coords = Vec::with_capacity(64);
+        let mut bridge_start_coords = Vec::with_capacity(INIT_CAPACITY);
 
         // Pixels with all:
         // - net == bridge
         // - touching current net (4way)
         // - pixels touch each other (8way)
-        let mut border_pixels = Vec::with_capacity(64);
+        let mut border_pixels = Vec::with_capacity(INIT_CAPACITY);
 
         // Stores the starting points of surrounding pixels. They need all:
         // - net != current && net != bridge
         // - touching a border net (8way) && a current net (4way)
-        let mut surround_start_pixels = Vec::with_capacity(64);
+        let mut surround_start_pixels = Vec::with_capacity(INIT_CAPACITY);
 
-        let mut border_visited = HashSet::with_capacity(64);
-        let mut surround_visited = HashSet::with_capacity(64);
+        let mut border_visited = HashSet::with_capacity(INIT_CAPACITY);
+        let mut surround_visited = HashSet::with_capacity(INIT_CAPACITY);
 
         // Alternative: Use two UnionFind
-        let mut bridges = HashSet::with_capacity(64);
+        let mut bridges = HashSet::with_capacity(INIT_CAPACITY);
+
+        // Try Optimize: currently dfs is storing all nodes like how bfs would do it
+        let mut dfs_stack = Vec::with_capacity(INIT_CAPACITY);
 
         // --- Create lables by color & power ---
-
-        let (width, height) = (image.width(), image.height());
 
         let neighbours_4 = |x: u32, y: u32| {
             [
@@ -188,9 +219,6 @@ impl Circuit {
                 if x < width { Some((x + 1, y)) } else { None },  // Right
             ]
         };
-
-        // Try Optimize: currently dfs is storing all nodes like how bfs would do it
-        let mut dfs_stack = Vec::with_capacity(u32::min(width, height) as usize);
 
         for y in 0..height {
             for x in 0..width {
@@ -212,6 +240,12 @@ impl Circuit {
 
                 // Start New Net
                 let current_net = net_aliases.extend(1);
+                if let Pixel::Gate { ty, .. } = current_pixel {
+                    // "gates" is a non-sparse map => we need also to fill in the
+                    // empty slots with some placeholders.
+                    gates.resize(current_net as usize, None);
+                    gates.push(Some(Gate::new(ty)));
+                }
 
                 image.set_net(x, y, current_net);
                 dfs_stack.push((x, y));
@@ -222,7 +256,13 @@ impl Circuit {
                         match neighbour_pixel {
                             Pixel::Insulator => continue,
                             Pixel::Power => {
-                                net_aliases.alias(current_net, NET_ON);
+                                if let Some(Some(gate)) = gates.get_mut(current_net as usize) {
+                                    if !gate.outputs.contains(&NET_ON) {
+                                        gate.outputs.push(NET_ON);
+                                    }
+                                } else {
+                                    net_aliases.alias(current_net, NET_ON);
+                                }
                                 continue;
                             }
                             Pixel::Gate {
@@ -236,12 +276,33 @@ impl Circuit {
 
                                 // Skip if current is wire
                                 let Some(current_ty) = current_pixel.gate_type() else {
+                                    // Register wire (current) touching gate (neighbour)
+                                    if neighbour_net != NET_UNVISITED
+                                        && let Some(Some(gate)) =
+                                            gates.get_mut(neighbour_net as usize)
+                                        && !gate.outputs.contains(&current_net)
+                                    {
+                                        gate.outputs.push(current_net);
+                                    }
                                     continue;
                                 };
 
                                 // Skip if not same gate
                                 if current_ty != neighbour_ty {
-                                    // TODO: Register current gate touching oposite gate type
+                                    // Register gate touching opposite gate
+                                    if let Ok([Some(current_gate), Some(neighbour_gate)]) = gates
+                                        .get_disjoint_mut([
+                                            current_net as usize,
+                                            neighbour_net as usize,
+                                        ])
+                                    {
+                                        if !current_gate.inputs.contains(&neighbour_net) {
+                                            current_gate.inputs.push(neighbour_net);
+                                        }
+                                        if !neighbour_gate.inputs.contains(&current_net) {
+                                            neighbour_gate.inputs.push(current_net);
+                                        }
+                                    }
                                     continue;
                                 }
                             }
@@ -256,7 +317,14 @@ impl Circuit {
 
                                 // Skip if current is gate
                                 let Some(current_color) = current_pixel.wire_color() else {
-                                    // TODO: Store wire touching gate
+                                    // Register gate (current) touching wire (neighbour)
+                                    if neighbour_net != NET_UNVISITED
+                                        && let Some(Some(gate)) =
+                                            gates.get_mut(current_net as usize)
+                                        && !gate.outputs.contains(&neighbour_net)
+                                    {
+                                        gate.outputs.push(neighbour_net);
+                                    }
                                     continue;
                                 };
 
@@ -583,54 +651,110 @@ impl Circuit {
             }
         }
 
-        // Merge nets of bridged wires
-        image.net_count = net_aliases.compact();
+        // --- Apply net aliases ---
+        let rename_map = {
+            let (mut net_aliases, net_count) = net_aliases.into_compact_rename();
+            image.net_count = net_count;
+
+            // Rename nets so that all gates are together at the back
+            let mut rename_map: Vec<_> = (0..net_count).collect();
+            let mut right = net_count;
+            for (net, net_alias) in net_aliases.iter_mut().enumerate() {
+                let current = rename_map[*net_alias as usize];
+                if gates.get(net).is_some_and(|g| g.is_some()) {
+                    right -= 1;
+                    rename_map[current as usize] = right;
+                    rename_map[right as usize] = current;
+                    *net_alias = right;
+                } else {
+                    *net_alias = current;
+                }
+            }
+            net_aliases
+        };
+
         for net in &mut image.nets {
-            *net = net_aliases.parent(*net);
+            if gates.get(*net as usize).is_none_or(|g| g.is_none()) {
+                *net = rename_map[*net as usize];
+            }
+        }
+        for gate in gates.iter_mut().flatten() {
+            for _ in 0..gate.inputs.len() {
+                let net = rename_map[gate.inputs.swap_remove(0) as usize];
+                if !gate.inputs.contains(&net) {
+                    gate.inputs.push(net);
+                }
+            }
+            for _ in 0..gate.outputs.len() {
+                let net = rename_map[gate.outputs.swap_remove(0) as usize];
+                if !gate.outputs.contains(&net) {
+                    gate.outputs.push(net);
+                }
+            }
         }
 
-        Circuit { image }
+        Circuit { image, gates }
     }
 
     pub fn net_count(&self) -> u32 {
         self.image.net_count()
     }
+
+    pub fn get_gate(&self, net: u32) -> Option<&Gate> {
+        self.gates.get(net as usize).and_then(|r| r.as_ref())
+    }
 }
 
 struct UnionFind {
-    // Invariant: aliases[i] <= i
-    aliases: Vec<u32>,
+    // Invariant: parents[i] <= i
+    // Invariant: len <= u32::MAX + 1
+    parents: Vec<u32>,
 }
 
+#[allow(dead_code)]
 impl UnionFind {
-    pub fn new(net_count: u32) -> UnionFind {
+    pub fn new(node_count: u32) -> UnionFind {
         UnionFind {
-            aliases: (0..net_count).collect(),
+            parents: (0..node_count).collect(),
         }
+    }
+
+    pub fn from_vec_unchecked(parents: Vec<u32>) -> UnionFind {
+        UnionFind { parents }
     }
 
     /// Crates n consecutive new nodes.
     /// Returns first node created.
-    pub fn extend(&mut self, new_nodes_count: u32) -> u32 {
-        let first = u32::try_from(self.aliases.len()).unwrap();
-        self.aliases.extend(first..first + new_nodes_count);
+    pub fn extend(&mut self, n: u32) -> u32 {
+        let first = self.parents.len();
+
+        // Check Invariant "len <= u32::MAX + 1"
+        debug_assert!(n <= u32::MAX - (first - 1) as u32);
+
+        let first = first as u32;
+        self.parents.extend(first..first + n);
         first
     }
 
     /// Finds the root and compresses the path to it by half
     pub fn root(&mut self, mut i: u32) -> u32 {
-        while i != self.aliases[i as usize] {
-            let parent = self.aliases[i as usize];
-            let grandparent = self.aliases[parent as usize];
+        while i != self.parents[i as usize] {
+            let parent = self.parents[i as usize];
+            let grandparent = self.parents[parent as usize];
 
-            self.aliases[i as usize] = grandparent;
+            self.parents[i as usize] = grandparent;
             i = grandparent;
         }
         i
     }
 
+    /// Returns the amount of nodes independently of the aliases
+    pub fn len(&self) -> u32 {
+        self.parents.len() as u32
+    }
+
     pub fn parent(&mut self, i: u32) -> u32 {
-        self.aliases[i as usize]
+        self.parents[i as usize]
     }
 
     /// Return the root of the resulting alias
@@ -639,36 +763,47 @@ impl UnionFind {
         let root_b = self.root(b);
 
         if root_a < root_b {
-            self.aliases[root_b as usize] = root_a;
+            self.parents[root_b as usize] = root_a;
             root_a
         } else {
-            self.aliases[root_a as usize] = root_b;
+            self.parents[root_a as usize] = root_b;
             root_b
         }
     }
 
-    /// Resolves dependencies, and removes holes
-    /// (meaning that all roots will be contiguous from 0 to root_count)
+    /// Converts the UnionFind alias-datastructure into a dense rename map.
     ///
-    /// Returns the amount of disctinct roots.
-    pub fn compact(&mut self) -> u32 {
+    /// - The parents of i (vec[i]) will point to what was the root of the node i (root(i)).
+    /// - All elements of the returned vec will be in 0..=(the amount of disctinct roots - 1)
+    ///   without any value missing.
+    ///
+    /// Returns (the Vec rename mapping, the amount of disctinct roots).
+    pub fn into_compact_rename(mut self) -> (Vec<u32>, u32) {
         let mut root_count = 0;
-        for i in 0..self.aliases.len() {
-            if self.aliases[i] == i as u32 {
-                self.aliases[i] = root_count;
+        for i in 0..self.parents.len() {
+            if self.parents[i] == i as u32 {
+                self.parents[i] = root_count;
                 root_count += 1;
             } else {
-                self.aliases[i] = self.aliases[self.aliases[i] as usize];
+                self.parents[i] = self.parents[self.parents[i] as usize];
             }
         }
-        root_count
+        (self.parents, root_count)
     }
 
-    // /// Resove the backwards dependencies.
-    // /// After this call, for all i: parent(i) == root(i)
-    // pub fn flatten(&mut self) {
-    //     for i in 0..self.aliases.len() {
-    //         self.aliases[i] = self.aliases[self.aliases[i] as usize];
-    //     }
-    // }
+    /// Resove the backwards dependencies.
+    /// After this call, for all i: parent(i) == root(i)
+    pub fn flatten(&mut self) {
+        for i in 0..self.parents.len() {
+            self.parents[i] = self.parents[self.parents[i] as usize];
+        }
+    }
+
+    /// Removes all aplied aliases.
+    /// Sets the root of every node to itselfs.
+    pub fn reset_aliases(&mut self) {
+        for i in 0..self.parents.len() {
+            self.parents[i] = i as u32;
+        }
+    }
 }

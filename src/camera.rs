@@ -11,6 +11,7 @@ pub struct Camera {
     pub scale: f32,
 }
 
+#[allow(dead_code)]
 impl Camera {
     /// Create a new camera
     pub fn new() -> Self {
@@ -22,12 +23,10 @@ impl Camera {
 
     /// Sets the base scale so that one texel maps to N surface pixels.
     /// This value is always uniform (no X/Y deformation).
-    #[allow(dead_code)]
     pub fn set_surface_pixels_per_texel(&mut self, surface_pixels_per_texel: f32) {
         self.scale = surface_pixels_per_texel;
     }
 
-    #[allow(dead_code)]
     pub fn surface_pixels_per_texel(&self) -> f32 {
         self.scale
     }
