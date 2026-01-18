@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use eframe::{
-    egui::{self, Key, PaintCallback, PointerButton, Sense, Ui, Vec2},
+    egui::{self, Key, PaintCallback, PointerButton, Pos2, Sense, Ui, Vec2},
     egui_glow,
     glow::{self, HasContext},
 };
@@ -9,6 +9,9 @@ use image::{EncodableLayout, ImageReader};
 
 mod circuit;
 use circuit::*;
+
+mod camera;
+use camera::*;
 
 fn main() {
     let options = eframe::NativeOptions {
@@ -33,6 +36,8 @@ struct MyEguiApp {
 
     program: glow::Program,
     vertex_array: glow::VertexArray,
+
+    camera: Camera,
 }
 
 impl MyEguiApp {
@@ -54,9 +59,13 @@ impl MyEguiApp {
             use glow::*;
             gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_MIN_FILTER, NEAREST as i32);
             gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_MAG_FILTER, NEAREST as i32);
-            gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_WRAP_S, CLAMP_TO_EDGE as i32);
-            gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_WRAP_T, CLAMP_TO_EDGE as i32);
 
+            let background = [0., 0., 0., 255.];
+            gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_WRAP_S, CLAMP_TO_BORDER as i32);
+            gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_WRAP_T, CLAMP_TO_BORDER as i32);
+            gl.tex_parameter_f32_slice(TEXTURE_2D, TEXTURE_BORDER_COLOR, &background);
+
+            // Configure RGB format without padding. (align at 1 byte)
             gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
 
             gl.tex_image_2d(
@@ -80,10 +89,6 @@ impl MyEguiApp {
             use glow::*;
             gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_MIN_FILTER, NEAREST as i32);
             gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_MAG_FILTER, NEAREST as i32);
-            gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_WRAP_S, CLAMP_TO_EDGE as i32);
-            gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_WRAP_T, CLAMP_TO_EDGE as i32);
-
-            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
 
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
@@ -99,18 +104,11 @@ impl MyEguiApp {
             texture
         };
 
-        // let size = [img.width() as usize, img.height() as usize];
-        // let pixels = img
-        //     .chunks_exact(3)
-        //     .map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], 255))
-        //     .collect();
-        // let color_image = ColorImage::new(size, pixels);
-        //
-        // let texture: TextureHandle =
-        //     cc.egui_ctx
-        //         .load_texture("circuit.png", color_image, TextureOptions::NEAREST);
-
         let (program, vertex_array) = Self::init_shadersnew(gl);
+
+        let mut camera = Camera::new();
+        camera.position =
+            Vec2::new(circuit.image.width() as f32, circuit.image.height() as f32) / 2.;
 
         Self {
             tex_image,
@@ -119,6 +117,7 @@ impl MyEguiApp {
             cursor: (0, 0),
             program,
             vertex_array,
+            camera,
         }
     }
 }
@@ -177,19 +176,51 @@ impl MyEguiApp {
             self.circuit.image.width() as f32,
             self.circuit.image.height() as f32,
         );
+        let surface_size = ui.available_size();
 
-        let max = ui.available_size();
+        let (rect, response) = ui.allocate_exact_size(surface_size, Sense::drag());
 
-        let rect_size = if tex_size.x / tex_size.y >= max.x / max.y {
-            Vec2::new(max.x, tex_size.y * max.x / tex_size.x)
-        } else {
-            Vec2::new(tex_size.x * max.y / tex_size.y, max.y)
-        };
+        if let (true, Some(hover_pos)) = (
+            response.contains_pointer(),
+            ui.input(|i| i.pointer.hover_pos()),
+        ) {
+            // let zoom_factor = ui.input(|i| i.zoom_delta());
+            let (mut zoom_factor, scroll_delta) =
+                ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta.y));
 
-        let (rect, response) = ui.allocate_exact_size(rect_size, Sense::drag());
+            if zoom_factor == 1. && scroll_delta != 0. {
+                let scroll_zoom_speed = ui.ctx().options(|opt| opt.input_options.scroll_zoom_speed);
+                zoom_factor += scroll_delta * scroll_zoom_speed
+            };
+
+            if zoom_factor != 1. {
+                let center = hover_pos - response.rect.min;
+                self.camera.zoom_surface(zoom_factor, center, surface_size);
+            }
+        }
+
+        // --- Circuit interact ---
+        if let Some(pointer_pos) = response.interact_pointer_pos() {
+            if response.dragged_by(PointerButton::Primary) {
+                // Position inside the image rect (in points)
+                let local_pos = pointer_pos - response.rect.min;
+
+                let texel = self.camera.surface_to_texel(local_pos, surface_size);
+                self.cursor = (texel.x as u32, texel.y as u32);
+            }
+            if response.dragged_by(PointerButton::Secondary) {
+                self.camera.position -=
+                    response.drag_delta() * self.camera.texels_per_surface_pixel();
+            }
+        }
+        // let mut scroll_delta = ui.input(|i| i.smooth_scroll_delta);
+        // self.camera.position -= scroll_delta * self.camera.texels_per_surface_pixel();
+
+        let uv_min = self.camera.surface_to_texel(Vec2::ZERO, surface_size) / tex_size;
+        let uv_max = self.camera.surface_to_texel(surface_size, surface_size) / tex_size;
+        let uv_size = uv_max - uv_min;
 
         // Clone locals so we can move them into the paint callback:
-
         let program = self.program;
         let vertex_array = self.vertex_array;
         let tex_image = self.tex_image;
@@ -200,7 +231,6 @@ impl MyEguiApp {
             rect,
             callback: Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
                 let gl = painter.gl();
-                let resolution = rect_size;
 
                 use glow::*;
 
@@ -219,11 +249,22 @@ impl MyEguiApp {
                         Some(&gl.get_uniform_location(program, "tex_nets").unwrap()),
                         1,
                     );
-
                     gl.uniform_2_f32(
-                        Some(&gl.get_uniform_location(program, "resolution").unwrap()),
-                        resolution.x,
-                        resolution.y,
+                        Some(&gl.get_uniform_location(program, "uv_min").unwrap()),
+                        uv_min.x,
+                        uv_min.y,
+                    );
+                    gl.uniform_2_f32(
+                        Some(&gl.get_uniform_location(program, "uv_size").unwrap()),
+                        uv_size.x,
+                        uv_size.y,
+                    );
+
+                    let pixel_size = uv_size.x / surface_size.x;
+                    gl.uniform_2_f32(
+                        Some(&gl.get_uniform_location(program, "pixel_size").unwrap()),
+                        pixel_size.max(0.25 / surface_size.x),
+                        pixel_size.max(0.25 / surface_size.y),
                     );
 
                     gl.uniform_1_u32(
@@ -237,23 +278,6 @@ impl MyEguiApp {
             })),
         };
         ui.painter().add(callback);
-
-        // --- Circuit interact ---
-        if response.dragged_by(PointerButton::Primary)
-            && let Some(pointer_pos) = response.interact_pointer_pos()
-        {
-            // Position inside the image rect (in points)
-            let local_pos = pointer_pos - response.rect.min;
-
-            // Normalize to UV coordinates (0.0–1.0)
-            let uv = local_pos / response.rect.size();
-            let uv = uv.clamp(Vec2::ZERO, Vec2::splat(1.0));
-
-            // Step 3: convert UV to pixel coordinates
-            let pixel_x = ((uv.x * tex_size.x).floor() as u32).min(tex_size.x as u32 - 1);
-            let pixel_y = ((uv.y * tex_size.y).floor() as u32).min(tex_size.y as u32 - 1);
-            self.cursor = (pixel_x, pixel_y);
-        }
     }
     fn init_shadersnew(gl: &glow::Context) -> (glow::Program, glow::VertexArray) {
         let shader_version = if cfg!(target_arch = "wasm32") {

@@ -2,15 +2,13 @@ precision mediump float;
 
 uniform sampler2D tex_circuit;
 uniform usampler2D tex_nets;
-uniform vec2 resolution;
+uniform vec2 pixel_size;
 uniform uint target_net;
 
 in vec2 uv;
 out vec4 out_color;
 
 void main() {
-    vec2 pixel_size = 1. / resolution;
-
     float stroke_width = 1.;
     vec2 s = pixel_size * stroke_width;
 
