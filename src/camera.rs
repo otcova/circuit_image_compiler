@@ -22,10 +22,12 @@ impl Camera {
 
     /// Sets the base scale so that one texel maps to N surface pixels.
     /// This value is always uniform (no X/Y deformation).
-    pub fn set_scale(&mut self, surface_pixels_per_texel: f32) {
+    #[allow(dead_code)]
+    pub fn set_surface_pixels_per_texel(&mut self, surface_pixels_per_texel: f32) {
         self.scale = surface_pixels_per_texel;
     }
 
+    #[allow(dead_code)]
     pub fn surface_pixels_per_texel(&self) -> f32 {
         self.scale
     }
@@ -50,6 +52,7 @@ impl Camera {
     }
 
     /// Texel space → Surface pixel space
+    #[allow(dead_code)]
     pub fn texel_to_surface(&self, texel_pos: Vec2, surface_size: Vec2) -> Vec2 {
         (texel_pos - self.position) * self.scale + surface_size * 0.5
     }
@@ -60,6 +63,7 @@ impl Camera {
     }
 
     /// Snaps scale to whole pixels for perfect pixel art rendering
+    #[allow(dead_code)]
     pub fn snap_scale_to_pixels(&mut self) {
         self.scale = self.scale.round().max(1.0);
     }

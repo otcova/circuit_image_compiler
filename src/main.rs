@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use eframe::{
-    egui::{self, Key, PaintCallback, PointerButton, Pos2, Sense, Ui, Vec2},
+    egui::{self, Key, PaintCallback, PointerButton, Sense, Ui, Vec2},
     egui_glow,
     glow::{self, HasContext},
 };
@@ -16,7 +16,6 @@ use camera::*;
 fn main() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([800.0, 600.0]),
-        // multisampling: 4,
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
@@ -31,7 +30,7 @@ fn main() {
 struct MyEguiApp {
     tex_image: glow::NativeTexture,
     tex_nets: glow::NativeTexture,
-    circuit: CircuitImage,
+    circuit: Circuit,
     cursor: (u32, u32),
 
     program: glow::Program,
@@ -50,7 +49,7 @@ impl MyEguiApp {
             .unwrap()
             .to_rgb8();
 
-        let circuit = CircuitImage::new(img);
+        let circuit = Circuit::new(img);
 
         let tex_image = unsafe {
             let texture = gl.create_texture().unwrap();
@@ -77,7 +76,7 @@ impl MyEguiApp {
                 0,
                 glow::RGB,
                 glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(Some(circuit.image.as_bytes())),
+                glow::PixelUnpackData::Slice(Some(circuit.image.colors().as_bytes())),
             );
             texture
         };
@@ -90,6 +89,7 @@ impl MyEguiApp {
             gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_MIN_FILTER, NEAREST as i32);
             gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_MAG_FILTER, NEAREST as i32);
 
+            let raw_nets = bytemuck::cast_slice(circuit.image.nets());
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,
@@ -99,7 +99,7 @@ impl MyEguiApp {
                 0,
                 glow::RED_INTEGER,
                 glow::UNSIGNED_INT,
-                glow::PixelUnpackData::Slice(Some(bytemuck::cast_slice(&circuit.nets))),
+                glow::PixelUnpackData::Slice(Some(raw_nets)),
             );
             texture
         };
@@ -130,6 +130,7 @@ impl eframe::App for MyEguiApp {
         }
 
         egui::SidePanel::left("left_bar")
+            .min_width(230.0)
             .resizable(false)
             .show(ctx, |ui| {
                 ui.heading("Tools?");
@@ -140,24 +141,27 @@ impl eframe::App for MyEguiApp {
                     .show(ui, |ui| {
                         let (x, y) = self.cursor;
                         ui.strong(format!("pos:   {x}, {y}"));
-                        ui.strong(format!("net: {}", self.circuit.get_net(x, y)));
 
-                        let color = *self.circuit.image.get_pixel(x, y);
-                        ui.strong(format!("color: {color:?}"));
-                        ui.strong(format!("saturation: {:.0}%", 100. * saturation(color)));
-                        ui.strong(format!("value: {:.0}%", 100. * value(color)));
+                        let pixel = self.circuit.image.pixel(x, y);
+                        ui.strong(format!("gate type: {:?}", pixel.gate_type()));
+                        ui.strong(format!("color: {:?}", pixel.wire_color()));
+                        ui.strong(format!("net: {:?}", pixel.net()));
+
+                        let color = *self.circuit.image.colors().get_pixel(x, y);
+                        ui.strong(format!("saturation: {:.0}%", 100. * hsv_saturation(color)));
+                        ui.strong(format!("value: {:.0}%", 100. * hsv_value(color)));
 
                         ui.separator();
 
-                        ui.strong(format!("net count: {:?}", self.circuit.net_count));
+                        ui.strong(format!("net count: {:?}", self.circuit.net_count()));
                     });
             });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            egui::Frame::new().show(ui, |ui| {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new())
+            .show(ctx, |ui| {
                 self.custom_painting(ui);
             });
-        });
     }
 
     fn on_exit(&mut self, gl: Option<&glow::Context>) {
@@ -225,7 +229,7 @@ impl MyEguiApp {
         let vertex_array = self.vertex_array;
         let tex_image = self.tex_image;
         let tex_nets = self.tex_nets;
-        let target_net = self.circuit.get_net(self.cursor.0, self.cursor.1);
+        let target_net = self.circuit.image.net_at(self.cursor.0, self.cursor.1);
 
         let callback = PaintCallback {
             rect,

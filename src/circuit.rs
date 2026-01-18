@@ -2,18 +2,141 @@ use std::collections::HashSet;
 
 use image::{ImageBuffer, Rgb};
 
-pub struct CircuitImage {
-    pub image: ImageBuffer<Rgb<u8>, Vec<u8>>,
-    pub nets: Vec<u32>,
-    pub net_count: u32,
+// Permanent unconditional off
+const NET_OFF: u32 = 0;
+
+// Permanent unconditional on (power)
+const NET_ON: u32 = 1;
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum GateType {
+    Active,
+    Pasive,
 }
 
-pub fn value(pixel: Rgb<u8>) -> f32 {
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Pixel {
+    Insulator,
+    Power,
+    Gate { ty: GateType, net: u32 },
+    Wire { color: Rgb<u8>, net: u32 },
+}
+
+impl Pixel {
+    pub fn net(self) -> Option<u32> {
+        match self {
+            Pixel::Insulator => None,
+            Pixel::Power => Some(NET_ON),
+            Pixel::Gate { net, .. } => Some(net),
+            Pixel::Wire { net, .. } => Some(net),
+        }
+    }
+
+    // Returns None if it's not a gate
+    pub fn gate_type(self) -> Option<GateType> {
+        if let Pixel::Gate { ty, .. } = self {
+            Some(ty)
+        } else {
+            None
+        }
+    }
+
+    // Returns None if it's not a wire
+    pub fn wire_color(self) -> Option<Rgb<u8>> {
+        if let Pixel::Wire { color, .. } = self {
+            Some(color)
+        } else {
+            None
+        }
+    }
+}
+
+pub struct Circuit {
+    pub image: CircuitImage,
+}
+
+pub struct CircuitImage {
+    colors: ImageBuffer<Rgb<u8>, Vec<u8>>,
+    nets: Vec<u32>,
+    /// Invariant: There are allways at least 2 nets 0 (allways off) and 1 (allways on)
+    /// even if not in use.
+    net_count: u32,
+}
+
+impl CircuitImage {
+    /// Initializes a new circuit image with all pixels set to NET_OFF.
+    pub fn new(colors: ImageBuffer<Rgb<u8>, Vec<u8>>) -> CircuitImage {
+        CircuitImage {
+            nets: vec![NET_OFF; colors.width() as usize * colors.height() as usize],
+            net_count: 2,
+            colors,
+        }
+    }
+
+    pub fn set_net(&mut self, x: u32, y: u32, net: u32) {
+        let index = x as usize + y as usize * self.width() as usize;
+        self.nets[index] = net;
+    }
+
+    pub fn colors(&self) -> &ImageBuffer<Rgb<u8>, Vec<u8>> {
+        &self.colors
+    }
+
+    pub fn nets(&self) -> &[u32] {
+        &self.nets
+    }
+
+    pub fn net_count(&self) -> u32 {
+        self.net_count
+    }
+
+    pub fn width(&self) -> u32 {
+        self.colors.width()
+    }
+
+    pub fn height(&self) -> u32 {
+        self.colors.height()
+    }
+
+    pub fn net_at(&self, x: u32, y: u32) -> u32 {
+        let index = x as usize + y as usize * self.width() as usize;
+        self.nets[index]
+    }
+
+    pub fn pixel(&self, x: u32, y: u32) -> Pixel {
+        let color = *self.colors.get_pixel(x, y);
+        let index = x as usize + y as usize * self.width() as usize;
+
+        if hsv_value(color) <= 0.15 {
+            Pixel::Insulator
+        } else if Rgb::<u8>([0, 166, 47]) == color {
+            Pixel::Gate {
+                ty: GateType::Active,
+                net: self.nets[index],
+            }
+        } else if Rgb::<u8>([0, 80, 152]) == color {
+            Pixel::Gate {
+                ty: GateType::Pasive,
+                net: self.nets[index],
+            }
+        } else if Rgb::<u8>([220, 20, 20]) == color {
+            Pixel::Power
+        } else {
+            let index = x as usize + y as usize * self.width() as usize;
+            Pixel::Wire {
+                color,
+                net: self.nets[index],
+            }
+        }
+    }
+}
+
+pub fn hsv_value(pixel: Rgb<u8>) -> f32 {
     let (r, g, b) = (pixel[0], pixel[1], pixel[2]);
     r.max(g).max(b) as f32 / 255.0
 }
 
-pub fn saturation(pixel: Rgb<u8>) -> f32 {
+pub fn hsv_saturation(pixel: Rgb<u8>) -> f32 {
     let (r, g, b) = (pixel[0], pixel[1], pixel[2]);
 
     let max = r.max(g).max(b);
@@ -27,43 +150,23 @@ pub fn saturation(pixel: Rgb<u8>) -> f32 {
     }
 }
 
-pub fn is_background(c: Rgb<u8>) -> bool {
-    // saturation(c) <= 0.15
-    value(c) <= 0.15
-}
+impl Circuit {
+    pub fn new(colors: ImageBuffer<Rgb<u8>, Vec<u8>>) -> Circuit {
+        let mut image = CircuitImage::new(colors);
+        const NET_UNVISITED: u32 = NET_OFF;
 
-pub fn is_active_gate(c: Rgb<u8>) -> bool {
-    Rgb::<u8>([0, 166, 47]) == c
-}
+        let mut net_aliases = UnionFind::new(2); // OFF and ON nets
 
-pub fn is_passive_gate(c: Rgb<u8>) -> bool {
-    Rgb::<u8>([0, 80, 152]) == c
-}
-
-pub fn is_gate(c: Rgb<u8>) -> bool {
-    is_active_gate(c) || is_passive_gate(c)
-}
-
-pub fn is_power(c: Rgb<u8>) -> bool {
-    Rgb::<u8>([220, 20, 20]) == c
-}
-
-impl CircuitImage {
-    pub fn new(image: ImageBuffer<Rgb<u8>, Vec<u8>>) -> CircuitImage {
-        // const LABEL_BACKGROUND: u32 = 0;
-        const LABEL_POWER: u32 = 1;
-
-        let mut intersection_coords = Vec::with_capacity(64);
-        let mut net_aliases = UnionFind::new(2); // background & power nets
+        let mut bridge_start_coords = Vec::with_capacity(64);
 
         // Pixels with all:
-        // - net == intersection
+        // - net == bridge
         // - touching current net (4way)
         // - pixels touch each other (8way)
         let mut border_pixels = Vec::with_capacity(64);
 
         // Stores the starting points of surrounding pixels. They need all:
-        // - net != current && net != intersection
+        // - net != current && net != bridge
         // - touching a border net (8way) && a current net (4way)
         let mut surround_start_pixels = Vec::with_capacity(64);
 
@@ -71,15 +174,13 @@ impl CircuitImage {
         let mut surround_visited = HashSet::with_capacity(64);
 
         // Alternative: Use two UnionFind
-        let mut intersections = HashSet::with_capacity(64);
+        let mut bridges = HashSet::with_capacity(64);
 
         // --- Create lables by color & power ---
 
         let (width, height) = (image.width(), image.height());
-        let mut nets = vec![0; width as usize * height as usize];
-        let get_index = |x: u32, y: u32| y as usize * width as usize + x as usize;
 
-        let neighbors_4 = |x: u32, y: u32| {
+        let neighbours_4 = |x: u32, y: u32| {
             [
                 if y > 0 { Some((x, y - 1)) } else { None },      // Up
                 if y < height { Some((x, y + 1)) } else { None }, // Down
@@ -93,67 +194,92 @@ impl CircuitImage {
 
         for y in 0..height {
             for x in 0..width {
-                if nets[get_index(x, y)] != 0 {
-                    continue;
-                }
+                let current_pixel = image.pixel(x, y);
 
-                let current_color = *image.get_pixel(x, y);
-                if is_background(current_color) {
+                let current_net = match current_pixel {
+                    Pixel::Insulator => continue,
+                    Pixel::Power => {
+                        image.set_net(x, y, NET_ON);
+                        continue;
+                    }
+                    Pixel::Gate { net, .. } => net,
+                    Pixel::Wire { net, .. } => net,
+                };
+
+                if current_net != NET_UNVISITED {
                     continue;
                 }
 
                 // Start New Net
-                let current_net = if is_power(current_color) {
-                    LABEL_POWER
-                } else {
-                    net_aliases.new_net()
-                };
-                nets[get_index(x, y)] = current_net;
+                let current_net = net_aliases.extend(1);
+
+                image.set_net(x, y, current_net);
                 dfs_stack.push((x, y));
 
                 while let Some((x, y)) = dfs_stack.pop() {
-                    let current_color = *image.get_pixel(x, y);
-                    let current_is_power = is_power(current_color);
-                    let current_is_gate = is_gate(current_color);
-
-                    for (nx, ny) in neighbors_4(x, y).into_iter().flatten() {
-                        let neighbor_color = *image.get_pixel(nx, ny);
-                        if is_background(neighbor_color) {
-                            continue;
-                        }
-
-                        let neighbor_net = nets[get_index(nx, ny)];
-                        if current_net == neighbor_net {
-                            continue; // Already visited
-                        }
-
-                        let is_glued = current_is_power || is_power(neighbor_color);
-
-                        // If neighbor connected and not visited, check it recursively
-                        if current_color == neighbor_color || is_glued {
-                            if neighbor_net == 0 {
-                                if is_power(neighbor_color) {
-                                    net_aliases.alias(current_net, LABEL_POWER);
+                    for (nx, ny) in neighbours_4(x, y).into_iter().flatten() {
+                        let neighbour_pixel = image.pixel(nx, ny);
+                        match neighbour_pixel {
+                            Pixel::Insulator => continue,
+                            Pixel::Power => {
+                                net_aliases.alias(current_net, NET_ON);
+                                continue;
+                            }
+                            Pixel::Gate {
+                                ty: neighbour_ty,
+                                net: neighbour_net,
+                            } => {
+                                // Skip if already visited
+                                if current_net == neighbour_net {
+                                    continue;
                                 }
 
-                                nets[get_index(nx, ny)] = current_net;
-                                dfs_stack.push((nx, ny));
+                                // Skip if current is wire
+                                let Some(current_ty) = current_pixel.gate_type() else {
+                                    continue;
+                                };
+
+                                // Skip if not same gate
+                                if current_ty != neighbour_ty {
+                                    // TODO: Register current gate touching oposite gate type
+                                    continue;
+                                }
                             }
-                            continue;
+                            Pixel::Wire {
+                                color: neighbour_color,
+                                net: neighbour_net,
+                            } => {
+                                // Skip if already visited
+                                if current_net == neighbour_net {
+                                    continue;
+                                }
+
+                                // Skip if current is gate
+                                let Some(current_color) = current_pixel.wire_color() else {
+                                    // TODO: Store wire touching gate
+                                    continue;
+                                };
+
+                                // Skip if not same wire
+                                if current_color != neighbour_color {
+                                    // If touching another wire, store it to check bridges later on.
+                                    bridge_start_coords.push(((x, y), (nx, ny)));
+                                    continue;
+                                }
+                            }
                         }
 
-                        // Touching another wire? Store it to check bridges it later on.
-                        if !is_glued && !current_is_gate && !is_gate(neighbor_color) {
-                            intersection_coords.push(((x, y), (nx, ny)));
-                        }
+                        // Neighbour is connected and not visited => check it recursively
+                        image.set_net(nx, ny, current_net);
+                        dfs_stack.push((nx, ny));
                     }
                 }
             }
         }
 
-        // --- Solve wire intersections ---
+        // --- Solve wire bridges ---
 
-        let neighbors_8 = |x: u32, y: u32| {
+        let neighbours_8 = |x: u32, y: u32| {
             let (x0, x1) = (0 < x, x + 1 < width);
             let (y0, y1) = (0 < y, y + 1 < height);
 
@@ -171,24 +297,36 @@ impl CircuitImage {
 
         let mut previous_net = 0;
 
-        // Loop for each border connecting current net with intersect net
-        for ((first_x, first_y), (first_nx, first_ny)) in intersection_coords {
-            let current_net = nets[get_index(first_x, first_y)];
-            let intersect_net = nets[get_index(first_nx, first_ny)];
+        // Loop for each border connecting current net with bridge net
+        for ((first_x, first_y), (first_nx, first_ny)) in bridge_start_coords {
+            let current_pixel = image.pixel(first_x, first_y);
+            let Pixel::Wire {
+                color: current_color,
+                net: current_net,
+            } = current_pixel
+            else {
+                continue;
+            };
+
+            let bridge_pixel = image.pixel(first_nx, first_ny);
+            let Pixel::Wire {
+                color: _bridge_color,
+                net: bridge_net,
+            } = bridge_pixel
+            else {
+                continue;
+            };
 
             if current_net != previous_net {
                 previous_net = current_net;
                 border_visited.clear();
             }
 
-            if border_visited.contains(&get_index(first_nx, first_ny)) {
+            if border_visited.contains(&(first_nx, first_ny)) {
                 continue;
             }
 
-            let current_color = *image.get_pixel(first_x, first_y);
-            let intersect_color = *image.get_pixel(first_nx, first_ny);
-
-            let (mut slope_x, mut slope_y) = (0., 0.);
+            let (mut normal_x, mut normal_y) = (0., 0.);
             border_pixels.clear();
             surround_start_pixels.clear();
             surround_visited.clear();
@@ -196,41 +334,42 @@ impl CircuitImage {
             // println!(" [NET {current_net}]> Check Border start: {first_nx}, {first_ny}");
 
             let mut dfs_visit = |x: u32, y: u32| {
-                let xy_index = get_index(x, y);
-                if border_visited.contains(&xy_index) {
+                if border_visited.contains(&(x, y)) {
                     return false;
                 }
 
-                if nets[xy_index] != intersect_net {
-                    // Check if it's surround pixel
-                    if nets[xy_index] != current_net
-                        && neighbors_4(x, y)
+                let net = image.net_at(x, y);
+
+                if net != bridge_net {
+                    // If it's surround pixel => Store it to check it later on
+                    if net != current_net
+                        && neighbours_4(x, y)
                             .into_iter()
                             .flatten()
-                            .any(|(nx, ny)| nets[get_index(nx, ny)] == current_net)
+                            .any(|(nx, ny)| image.net_at(nx, ny) == current_net)
                     {
                         surround_start_pixels.push((x, y));
                     }
                     return false;
                 }
 
-                border_visited.insert(xy_index);
+                border_visited.insert((x, y));
 
                 // Check if it's border pixel
-                let (mut pixel_slope_x, mut pixel_slope_y) = (0_f32, 0_f32);
+                let (mut pixel_normal_x, mut pixel_normal_y) = (0_f32, 0_f32);
                 let mut count = 0.;
-                for (nx, ny) in neighbors_4(x, y).into_iter().flatten() {
-                    if nets[get_index(nx, ny)] == current_net {
-                        pixel_slope_x += (x as i64 - nx as i64) as f32;
-                        pixel_slope_y += (y as i64 - ny as i64) as f32;
+                for (nx, ny) in neighbours_4(x, y).into_iter().flatten() {
+                    if image.net_at(nx, ny) == current_net {
+                        pixel_normal_x += (x as i64 - nx as i64) as f32;
+                        pixel_normal_y += (y as i64 - ny as i64) as f32;
                         count += 1.;
                     }
                 }
                 if count == 0. {
                     false
                 } else {
-                    slope_x += pixel_slope_x / count;
-                    slope_y += pixel_slope_y / count;
+                    normal_x += pixel_normal_x / count;
+                    normal_y += pixel_normal_y / count;
                     true
                 }
             };
@@ -244,7 +383,7 @@ impl CircuitImage {
             while let Some((x, y)) = dfs_stack.pop() {
                 border_pixels.push((x, y));
 
-                for (nx, ny) in neighbors_8(x, y).into_iter().flatten() {
+                for (nx, ny) in neighbours_8(x, y).into_iter().flatten() {
                     if dfs_visit(nx, ny) {
                         dfs_stack.push((nx, ny));
                     }
@@ -252,31 +391,31 @@ impl CircuitImage {
             }
 
             // Intersection limits
-            let min_slope = border_pixels.len() / 4;
-            let max_intersection_length = 64 * border_pixels.len();
+            let min_normal = border_pixels.len() / 4;
+            let max_bridge_length = 64 * border_pixels.len();
 
-            // Discard if slope too small (ensures slope > 0)
-            if slope_x.abs() + slope_y.abs() <= min_slope as f32 {
+            // Discard if normal is too small (ensures |normal| > 0)
+            if normal_x.abs() + normal_y.abs() <= min_normal as f32 {
                 continue;
             }
 
-            if slope_x.abs() < slope_y.abs() {
-                slope_x /= slope_y.abs();
-                slope_y = slope_y.signum();
-            } else if slope_y.abs() < slope_x.abs() {
-                slope_y /= slope_x.abs();
-                slope_x = slope_x.signum();
+            if normal_x.abs() < normal_y.abs() {
+                normal_x /= normal_y.abs();
+                normal_y = normal_y.signum();
+            } else if normal_y.abs() < normal_x.abs() {
+                normal_y /= normal_x.abs();
+                normal_x = normal_x.signum();
             } else {
-                slope_x = slope_x.signum();
-                slope_y = slope_y.signum();
+                normal_x = normal_x.signum();
+                normal_y = normal_y.signum();
             }
 
             // println!(
-            //     "  [NET {current_net}]> Check Border start: {}, {}, slope: {}, {}",
-            //     first_nx, first_ny, slope_x, slope_y
+            //     "  [NET {current_net}]> Check Border start: {}, {}, normal: {}, {}",
+            //     first_nx, first_ny, normal_x, normal_y
             // );
 
-            // 2. Check angle in surroundings vs intersection
+            // 2. Check angle in surroundings vs bridge
             let max_surround_len = 1 + border_pixels.len() / 3;
 
             /// # Minimum Pointyness Parameter
@@ -291,23 +430,23 @@ impl CircuitImage {
             /// Minimum dot product value to reject the bridge.
             /// No edge of a wire can have this pointyness for it to corss over.
             /// range: 0..1
-            /// - 0: Enforce >=90deg of all corners for intersection.
+            /// - 0: Enforce >=90deg of all corners for bridge.
             /// - 1: Nothing is valid (enforce 0deg)
             const MIN_DOT_PRODUCT: f32 = 0.95;
 
             let mut surrounding_success = false;
 
-            let slope_sq_len = slope_x * slope_x + slope_y * slope_y;
+            let normal_sq_len = normal_x * normal_x + normal_y * normal_y;
 
             while let Some((x, y)) = surround_start_pixels.pop() {
-                if surround_visited.contains(&get_index(x, y)) {
+                if surround_visited.contains(&(x, y)) {
                     continue;
                 }
-                surround_visited.insert(get_index(x, y));
+                surround_visited.insert((x, y));
 
-                let surround_net = nets[get_index(x, y)];
+                let surround_net = image.net_at(x, y);
 
-                let (mut surround_slope_x, mut surround_slope_y) = (0., 0.);
+                let (mut surround_normal_x, mut surround_normal_y) = (0., 0.);
 
                 let mut dfs_visit = |x: u32, y: u32| {
                     // Check if neighbour is surrounding, meaning that:
@@ -315,18 +454,18 @@ impl CircuitImage {
                     // - == parent net
                     // - touches current_net (4way)
 
-                    if nets[get_index(x, y)] != surround_net {
+                    if image.net_at(x, y) != surround_net {
                         return false;
                     }
 
-                    let (mut pixel_slope_x, mut pixel_slope_y) = (0_f32, 0_f32);
+                    let (mut pixel_normal_x, mut pixel_normal_y) = (0_f32, 0_f32);
                     let mut count = 0.;
 
                     // Check touches current_net & compute slop with it
-                    for (nnx, ny) in neighbors_4(x, y).into_iter().flatten() {
-                        if nets[get_index(nnx, ny)] == current_net {
-                            pixel_slope_x += (x as i64 - nnx as i64) as f32;
-                            pixel_slope_y += (y as i64 - ny as i64) as f32;
+                    for (nx, ny) in neighbours_4(x, y).into_iter().flatten() {
+                        if image.net_at(nx, ny) == current_net {
+                            pixel_normal_x += (x as i64 - nx as i64) as f32;
+                            pixel_normal_y += (y as i64 - ny as i64) as f32;
                             count += 1.;
                         }
                     }
@@ -334,8 +473,8 @@ impl CircuitImage {
                     if count == 0. {
                         false
                     } else {
-                        surround_slope_x += pixel_slope_x / count;
-                        surround_slope_y += pixel_slope_y / count;
+                        surround_normal_x += pixel_normal_x / count;
+                        surround_normal_y += pixel_normal_y / count;
                         true
                     }
                 };
@@ -347,9 +486,9 @@ impl CircuitImage {
                 if surround_len < max_surround_len {
                     dfs_stack.push((x, y));
 
-                    // Scan surrounding pixels while computing slope
+                    // Scan surrounding pixels while computing normal
                     while let Some((x, y)) = dfs_stack.pop() {
-                        for (nx, ny) in neighbors_8(x, y).into_iter().flatten() {
+                        for (nx, ny) in neighbours_8(x, y).into_iter().flatten() {
                             if dfs_visit(nx, ny) {
                                 surround_len += 1;
                                 if max_surround_len <= surround_len {
@@ -362,20 +501,20 @@ impl CircuitImage {
                     }
                 }
 
-                // Discard if slope too small
-                let min_surround_slope = surround_len / 6;
-                if surround_slope_x.abs() + surround_slope_y.abs() < min_surround_slope as f32 {
+                // Discard if normal too small
+                let min_surround_normal = surround_len / 6;
+                if surround_normal_x.abs() + surround_normal_y.abs() < min_surround_normal as f32 {
                     continue;
                 }
 
-                // Check angle of surrounding pixels vs intersected with dot product
-                let dot = slope_x * surround_slope_x + slope_y * surround_slope_y;
-                let surround_slope_sq_len =
-                    surround_slope_x * surround_slope_x + surround_slope_y * surround_slope_y;
-                let dot = dot / (surround_slope_sq_len * slope_sq_len).sqrt();
+                // Check angle of surrounding pixels vs bridgeed with dot product
+                let dot = normal_x * surround_normal_x + normal_y * surround_normal_y;
+                let surround_normal_sq_len =
+                    surround_normal_x * surround_normal_x + surround_normal_y * surround_normal_y;
+                let dot = dot / (surround_normal_sq_len * normal_sq_len).sqrt();
 
                 if MIN_DOT_PRODUCT <= dot {
-                    // Cancel intersection
+                    // Cancel bridge
                     surrounding_success = false;
                     break;
                 }
@@ -390,13 +529,14 @@ impl CircuitImage {
                 continue;
             }
 
-            // 3. Advance border points until exiting the intersected wire
+            // 3. Advance border points until exiting the bridgeed wire.
+            // Each border pixel is "ray traced" with the normal direction.
             while let Some((x, y)) = border_pixels.pop() {
                 let (mut pre_x, mut pre_y) = (x, y);
 
-                for i in 1..=max_intersection_length {
-                    let rx = x as i64 + (slope_x * i as f32) as i64;
-                    let ry = y as i64 + (slope_y * i as f32) as i64;
+                for i in 1..=max_bridge_length {
+                    let rx = x as i64 + (normal_x * i as f32) as i64;
+                    let ry = y as i64 + (normal_y * i as f32) as i64;
 
                     if rx < 0 || width as i64 <= rx || ry < 0 || height as i64 <= ry {
                         break;
@@ -408,19 +548,21 @@ impl CircuitImage {
                     let mut ray_ended = false;
 
                     let mut ray_hit = |x: u32, y: u32| {
-                        let color = *image.get_pixel(x, y);
-                        let net = nets[get_index(x, y)];
+                        let Pixel::Wire { color, net } = image.pixel(x, y) else {
+                            ray_ended = true;
+                            return;
+                        };
 
-                        if color != intersect_color {
+                        if net != bridge_net {
                             ray_ended = true;
                         }
 
                         // If hit, connect wires "current_net" and "net"
-                        if color == current_color && current_net != net {
-                            let is_new_alias = intersections.insert((current_net, net));
+                        if color == current_color && net != current_net {
+                            let is_new_alias = bridges.insert((current_net, net));
 
                             // If alias both ways, connect wires
-                            if is_new_alias && intersections.contains(&(net, current_net)) {
+                            if is_new_alias && bridges.contains(&(net, current_net)) {
                                 net_aliases.alias(current_net, net);
                             }
                         }
@@ -441,21 +583,17 @@ impl CircuitImage {
             }
         }
 
-        // Merge nets of intersecting wires
-        let net_count = net_aliases.compact();
-        for net in &mut nets {
+        // Merge nets of bridged wires
+        image.net_count = net_aliases.compact();
+        for net in &mut image.nets {
             *net = net_aliases.parent(*net);
         }
 
-        CircuitImage {
-            image,
-            nets,
-            net_count: net_count - 1,
-        }
+        Circuit { image }
     }
 
-    pub fn get_net(&self, x: u32, y: u32) -> u32 {
-        self.nets[y as usize * self.image.width() as usize + x as usize]
+    pub fn net_count(&self) -> u32 {
+        self.image.net_count()
     }
 }
 
@@ -471,10 +609,12 @@ impl UnionFind {
         }
     }
 
-    pub fn new_net(&mut self) -> u32 {
-        let i = u32::try_from(self.aliases.len()).unwrap();
-        self.aliases.push(i);
-        i
+    /// Crates n consecutive new nodes.
+    /// Returns first node created.
+    pub fn extend(&mut self, new_nodes_count: u32) -> u32 {
+        let first = u32::try_from(self.aliases.len()).unwrap();
+        self.aliases.extend(first..first + new_nodes_count);
+        first
     }
 
     /// Finds the root and compresses the path to it by half
