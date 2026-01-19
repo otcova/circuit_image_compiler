@@ -42,12 +42,12 @@ void main() {
     if (target_net > 0u) {
         if (target_net == net) {
             ivec2 p = ivec2(gl_FragCoord);
-            // if (p.x % 2 == 0 && p.y % 2 == 0) 
+            // if (p.x % 2 == 0 && p.y % 2 == 0) {
             if ((p.x + p.y / 2) % 2 == 0 && p.y % 2 == 0) {
             // if (p.x % 2 == p.y % 2){
                 out_color.rgb += vec3(0.3);
-        } else {
-
+            } else {
+                // Companate brightness given previously
                 out_color.rgb -= vec3(0.1);
             }
         }

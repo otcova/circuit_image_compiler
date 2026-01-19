@@ -1,19 +1,30 @@
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use eframe::{
-    egui::{self, Key, KeyboardShortcut, Modifiers, PaintCallback, PointerButton, Sense, Ui, Vec2},
+    egui::{
+        self, Key, KeyboardShortcut, Modifiers, PaintCallback, PointerButton, ScrollArea, Sense, Ui,
+    },
     egui_glow,
-    glow::{self, HasContext},
+    glow::{self},
 };
-use image::{EncodableLayout, ImageReader};
-
-mod circuit;
-use circuit::*;
+use image::ImageReader;
 
 mod camera;
-use camera::*;
+mod canvas;
+mod circuit;
+
+use canvas::*;
+use circuit::*;
+use native_dialog::DialogBuilder;
+use smallvec::SmallVec;
 
 fn main() {
+    env_logger::init();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([800.0, 600.0]),
         renderer: eframe::Renderer::Glow,
@@ -28,133 +39,56 @@ fn main() {
 }
 
 struct MyEguiApp {
-    tex_image: glow::Texture,
-    tex_nets: glow::Texture,
-    tex_state: glow::Texture,
-    buffer_state: glow::Buffer,
-
-    circuit: Circuit,
-    circuit_state: Vec<bool>,
-    interpreter: CircuitInterpreter,
+    circuit_canvas: CircuitCanvas,
+    circuit_runtime: Option<CircuitRuntime>,
 
     cursor: Option<(u32, u32)>,
 
-    program: glow::Program,
-    vertex_array: glow::VertexArray,
+    current_folder: PathBuf,
+    current_files: Vec<(String, PathBuf)>,
+    load_circuit_error_message: Option<String>,
 
-    camera: Camera,
+    fallback_file_dialog: Option<egui_file_dialog::FileDialog>,
+}
+
+struct CircuitRuntime {
+    name: String,
+    circuit: Circuit,
+    circuit_state: Vec<bool>,
+    interpreter: CircuitInterpreter,
 }
 
 impl MyEguiApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let gl = cc.gl.as_ref().expect("Glow backend is needed");
 
-        let img = ImageReader::open("circuits/test.png")
-            // let img = ImageReader::open("circuits/playground.png")
-            .unwrap()
-            .decode()
-            .unwrap()
-            .to_rgb8();
+        let current_folder = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let default_circuit = current_folder.join("circuits/test.png");
 
-        let circuit = Circuit::new(img);
+        let circuit_canvas = CircuitCanvas::new(gl);
 
-        let interpreter = CircuitInterpreter::default();
-        let mut circuit_state = Vec::new();
-        interpreter.initial_state(&circuit, &mut circuit_state);
+        // Configure UI Visuals
+        cc.egui_ctx.style_mut(|style| {
+            style.visuals.handle_shape = egui::style::HandleShape::Rect { aspect_ratio: 0.5 };
+            style.spacing.scroll.bar_width = 6.;
+            style.spacing.scroll.foreground_color = false;
+            style.spacing.item_spacing.y = 4.;
+        });
 
-        let tex_image = unsafe {
-            let texture = gl.create_texture().unwrap();
-            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-
-            use glow::*;
-            gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_MIN_FILTER, NEAREST as i32);
-            gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_MAG_FILTER, NEAREST as i32);
-
-            let background = [0., 0., 0., 255.];
-            gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_WRAP_S, CLAMP_TO_BORDER as i32);
-            gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_WRAP_T, CLAMP_TO_BORDER as i32);
-            gl.tex_parameter_f32_slice(TEXTURE_2D, TEXTURE_BORDER_COLOR, &background);
-
-            // Configure RGB format without padding. (align at 1 byte)
-            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGB as i32,
-                circuit.image.width() as i32,
-                circuit.image.height() as i32,
-                0,
-                glow::RGB,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(Some(circuit.image.colors().as_bytes())),
-            );
-            texture
-        };
-
-        let tex_nets = unsafe {
-            let texture = gl.create_texture().unwrap();
-            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-
-            use glow::*;
-            gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_MIN_FILTER, NEAREST as i32);
-            gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_MAG_FILTER, NEAREST as i32);
-            gl.tex_parameter_i32(TEXTURE_1D, TEXTURE_WRAP_S, CLAMP_TO_EDGE as i32);
-
-            let raw_nets = bytemuck::cast_slice(circuit.image.nets());
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::R32UI as i32,
-                circuit.image.width() as i32,
-                circuit.image.height() as i32,
-                0,
-                glow::RED_INTEGER,
-                glow::UNSIGNED_INT,
-                glow::PixelUnpackData::Slice(Some(raw_nets)),
-            );
-            texture
-        };
-
-        let buffer_state = unsafe {
-            let buffer = gl.create_buffer().unwrap();
-            gl.bind_buffer(glow::TEXTURE_BUFFER, Some(buffer));
-            gl.buffer_data_u8_slice(
-                glow::TEXTURE_BUFFER,
-                bytemuck::cast_slice(&circuit_state),
-                glow::DYNAMIC_DRAW,
-            );
-            buffer
-        };
-
-        let tex_state = unsafe {
-            let texture = gl.create_texture().unwrap();
-            gl.bind_texture(glow::TEXTURE_BUFFER, Some(texture));
-            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-            gl.tex_buffer(glow::TEXTURE_BUFFER, glow::R8UI, Some(buffer_state));
-            texture
-        };
-
-        let (program, vertex_array) = Self::init_shadersnew(gl);
-
-        let mut camera = Camera::new();
-        let tex_size = Vec2::new(circuit.image.width() as f32, circuit.image.height() as f32);
-        camera.position = tex_size / 2.;
-        camera.set_surface_pixels_per_texel(500. / tex_size.y);
-
-        Self {
-            tex_image,
-            tex_nets,
-            tex_state,
-            buffer_state,
-            circuit_state,
-            circuit,
-            interpreter,
+        let mut app = Self {
+            circuit_runtime: None,
+            current_folder,
+            current_files: Vec::new(),
+            circuit_canvas,
             cursor: None,
-            program,
-            vertex_array,
-            camera,
-        }
+            load_circuit_error_message: None,
+            fallback_file_dialog: None,
+        };
+
+        app.load_circuit(gl, &default_circuit);
+        app.load_circuit_error_message = None;
+
+        app
     }
 }
 
@@ -167,88 +101,294 @@ impl eframe::App for MyEguiApp {
             return;
         }
 
-        egui::SidePanel::left("left_bar")
-            .min_width(230.0)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.heading("Tools?");
-                ui.separator();
+        if let Some(file_dialog) = &mut self.fallback_file_dialog {
+            file_dialog.update(ctx);
+            if let Some(path) = file_dialog.take_picked() {
+                self.load_circuit(gl, &path);
+            }
+        }
 
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false; 2])
-                    .show(ui, |ui| self.left_panel(ctx, ui, gl));
+        egui::SidePanel::left("left_bar")
+            .min_width(250.0)
+            .resizable(false)
+            .frame(egui::Frame::new().inner_margin(egui::Margin::same(20)))
+            .show(ctx, |ui| {
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        self.show_circuit_info(ui, gl);
+                        self.show_execution_controls(ctx, ui, gl);
+                        self.show_selected_net_info(ui);
+                    });
             });
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new())
             .show(ctx, |ui| {
-                self.custom_painting(ui);
+                self.show_circuit(ui);
             });
     }
 
     fn on_exit(&mut self, gl: Option<&glow::Context>) {
         if let Some(gl) = gl {
-            unsafe {
-                gl.delete_program(self.program);
-                gl.delete_vertex_array(self.vertex_array);
-            }
+            self.circuit_canvas.delete(gl);
         }
     }
 }
 
 impl MyEguiApp {
-    fn left_panel(&mut self, ctx: &egui::Context, ui: &mut Ui, gl: &glow::Context) {
-        if let Some((x, y)) = self.cursor {
-            ui.strong(format!("pos:   {x}, {y}"));
+    fn separator(&self, ui: &mut Ui) {
+        ui.add(egui::Separator::default().spacing(10.));
+    }
 
-            let pixel = self.circuit.image.pixel(x, y);
-            if let Some(net) = pixel.net() {
-                ui.strong(format!("net: {:?}", net));
+    fn open_folder(&mut self, folder: &Path) -> std::io::Result<()> {
+        self.current_folder = folder.into();
 
-                if let Some(gate) = self.circuit.get_gate(net) {
-                    ui.strong(format!("gate type: {:?}", gate.ty));
-                    ui.strong(format!("gate inputs: {:?}", gate.inputs));
-                    ui.strong(format!("gate outputs: {:?}", gate.outputs));
+        // To check file name collisions.
+        // BTree to sort files alphabetically for better UX
+        let mut files = BTreeMap::<_, SmallVec<[_; 2]>>::new();
+        self.current_files.clear();
+
+        for path in fs::read_dir(folder)?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+        {
+            if let Some(ext) = path.extension()
+                && ext.to_string_lossy().to_lowercase() == "png"
+            {
+                let name = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into())
+                    .or_else(|| path.file_name().map(|n| n.to_string_lossy().into()))
+                    .unwrap_or_else(|| "circuit".into());
+
+                files.entry(name).or_default().push(path);
+            }
+        }
+
+        // Update current files
+        for (name, mut paths) in files {
+            if paths.len() == 1
+                && let Some(path) = paths.pop()
+            {
+                self.current_files.push((name, path));
+                continue;
+            }
+
+            // Enumerate files with same name
+            for (i, path) in paths.into_iter().enumerate() {
+                self.current_files.push((format!("{name} ({i})"), path));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn load_circuit(&mut self, gl: &glow::Context, path: &Path) {
+        self.circuit_runtime = None;
+        self.load_circuit_error_message = None;
+
+        if path.is_dir() {
+            if let Err(error) = self.open_folder(path) {
+                self.load_circuit_error_message = Some(format!(
+                    "Unable to open the folder: {}\n{}",
+                    path.display(),
+                    error
+                ));
+            }
+            return;
+        }
+
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into())
+            .unwrap_or_else(|| "circuit".into());
+
+        let img = match ImageReader::open(path) {
+            Ok(img) => match img.decode() {
+                Ok(img) => img.to_rgb8(),
+                Err(error) => {
+                    self.load_circuit_error_message = Some(format!(
+                        "Unable to load the circuit: {}\n{}",
+                        path.display(),
+                        error
+                    ));
+                    return;
+                }
+            },
+
+            Err(error) => {
+                self.load_circuit_error_message = Some(format!(
+                    "Unable to find the circuit: {}\n{}",
+                    path.display(),
+                    error
+                ));
+                return;
+            }
+        };
+
+        if let Some(folder) = path.parent() {
+            let _ = self.open_folder(folder);
+        };
+
+        let circuit = Circuit::new(img);
+        let interpreter = CircuitInterpreter::default();
+
+        let mut circuit_state = Vec::new();
+        interpreter.initial_state(&circuit, &mut circuit_state);
+
+        self.circuit_canvas.load_circuit(gl, &circuit);
+        self.circuit_canvas.load_circuit_state(gl, &circuit_state);
+
+        self.circuit_runtime = Some(CircuitRuntime {
+            name,
+            circuit,
+            circuit_state,
+            interpreter,
+        });
+    }
+
+    fn show_circuit_picker(&mut self, ui: &mut Ui, gl: &glow::Context) {
+        ui.horizontal(|ui| {
+            // TODO: Folder image
+            if ui.button("Load File").clicked() {
+                // Open file picker (try native, if not fallback with egui)
+                if let Some(path) = match DialogBuilder::file().open_single_file().show() {
+                    Ok(path) => path,
+                    Err(_) => {
+                        let mut file_dialog = egui_file_dialog::FileDialog::new();
+                        file_dialog.pick_file();
+                        self.fallback_file_dialog = Some(file_dialog);
+                        None
+                    }
+                } {
+                    self.load_circuit(gl, &path);
+
+                    self.current_folder = path;
+                    self.current_folder.pop();
                 }
             }
 
-            if let Some(&color) = self.circuit.image.colors().get_pixel_checked(x, y) {
-                ui.strong(format!("color: {:?}", color));
-                ui.strong(format!("saturation: {:.0}%", 100. * hsv_saturation(color)));
-                ui.strong(format!("value: {:.0}%", 100. * hsv_value(color)));
-            }
+            if self.current_files.len() > 1 {
+                let current_selection = self
+                    .circuit_runtime
+                    .as_ref()
+                    .map(|r| r.name.clone())
+                    .unwrap_or_else(|| "<Select Circuit>".into());
 
-            ui.separator();
+                let mut new_selection = None;
+                egui::ComboBox::from_id_salt("png_combo")
+                    .selected_text(current_selection)
+                    .show_ui(ui, |ui| {
+                        for (name, path) in &self.current_files {
+                            ui.selectable_value(&mut new_selection, Some(path), name);
+                        }
+                    });
+
+                if let Some(path) = new_selection {
+                    self.load_circuit(gl, &path.to_path_buf());
+                }
+            }
+        });
+
+        if let Some(error) = &self.load_circuit_error_message {
+            ui.colored_label(egui::Color32::RED, error);
         }
 
-        ui.strong(format!("net count: {:?}", self.circuit.net_count()));
+        ui.add_space(2.);
+    }
 
-        ui.separator();
+    /// UI that shows the net and other info of the selected pixel
+    fn show_circuit_info(&mut self, ui: &mut Ui, gl: &glow::Context) {
+        ui.heading("Circuit");
+
+        self.show_circuit_picker(ui, gl);
+
+        let Some(runtime) = &self.circuit_runtime else {
+            return;
+        };
+
+        ui.strong(format!("width: {:?}", runtime.circuit.image.width()));
+        ui.strong(format!("height: {:?}", runtime.circuit.image.height()));
+        ui.strong(format!("wires: {:?}", runtime.circuit.wire_count() - 2));
+        ui.strong(format!("gates: {:?}", runtime.circuit.gate_count()));
+    }
+
+    fn show_selected_net_info(&mut self, ui: &mut Ui) {
+        let Some((x, y)) = self.cursor else { return };
+        let Some(runtime) = &self.circuit_runtime else {
+            return;
+        };
+
+        self.separator(ui);
+        ui.heading("Net Info");
+        ui.strong(format!("pos:   {x}, {y}"));
+
+        let pixel = runtime.circuit.image.pixel(x, y);
+        if let Some(net) = pixel.net() {
+            ui.strong(format!("net: {:?}", net));
+
+            if let Some(gate) = runtime.circuit.get_gate(net) {
+                ui.strong(format!("gate type: {:?}", gate.ty));
+                ui.strong(format!("gate inputs: {:?}", gate.inputs));
+                ui.strong(format!("gate outputs: {:?}", gate.outputs));
+            }
+        }
+
+        if let Some(&color) = runtime.circuit.image.colors().get_pixel_checked(x, y) {
+            ui.strong(format!("color: {:?}", color));
+            ui.strong(format!("saturation: {:.0}%", 100. * hsv_saturation(color)));
+            ui.strong(format!("value: {:.0}%", 100. * hsv_value(color)));
+        }
+    }
+
+    fn show_execution_controls(&mut self, ctx: &egui::Context, ui: &mut Ui, gl: &glow::Context) {
+        if self.circuit_runtime.is_none() {
+            return;
+        }
+
+        self.separator(ui);
+
+        let Some(runtime) = &mut self.circuit_runtime else {
+            return;
+        };
+
+        ui.heading("Execution");
 
         let shortcut = |ctx: &egui::Context, modifiers: Modifiers, key: Key| {
             ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(modifiers, key)))
         };
 
         if ui.button("Reset ").clicked() || shortcut(ctx, Modifiers::NONE, Key::R) {
-            self.interpreter
-                .initial_state(&self.circuit, &mut self.circuit_state);
-            self.update_circuit_state_texture(gl);
+            runtime
+                .interpreter
+                .initial_state(&runtime.circuit, &mut runtime.circuit_state);
+            self.circuit_canvas
+                .load_circuit_state(gl, &runtime.circuit_state);
         }
 
         if ui.button("Step ").clicked() || shortcut(ctx, Modifiers::NONE, Key::ArrowRight) {
-            self.interpreter
-                .step(&self.circuit, &mut self.circuit_state);
-            self.update_circuit_state_texture(gl);
+            runtime
+                .interpreter
+                .step(&runtime.circuit, &mut runtime.circuit_state);
+            self.circuit_canvas
+                .load_circuit_state(gl, &runtime.circuit_state);
         }
     }
-    fn custom_painting(&mut self, ui: &mut Ui) {
-        let (width, height) = (self.circuit.image.width(), self.circuit.image.height());
-        let tex_size = Vec2::new(width as f32, height as f32);
 
+    fn show_circuit(&mut self, ui: &mut Ui) {
+        let Some(runtime) = &self.circuit_runtime else {
+            return;
+        };
+
+        // --- Allocate space for the circuit canvas ---
+        let width = runtime.circuit.image.width();
+        let height = runtime.circuit.image.height();
         let surface_size = ui.available_size();
-
         let (rect, response) = ui.allocate_exact_size(surface_size, Sense::drag());
 
+        // --- Zoom Interaction ---
         if let (true, Some(hover_pos)) = (
             response.contains_pointer(),
             ui.input(|i| i.pointer.hover_pos()),
@@ -264,17 +404,22 @@ impl MyEguiApp {
 
             if zoom_factor != 1. {
                 let center = hover_pos - response.rect.min;
-                self.camera.zoom_surface(zoom_factor, center, surface_size);
+                self.circuit_canvas
+                    .camera
+                    .zoom_surface(zoom_factor, center, surface_size);
             }
         }
 
-        // --- Circuit interact ---
+        // --- Click/Drag Interaction ---
         if let Some(pointer_pos) = response.interact_pointer_pos() {
             if response.dragged_by(PointerButton::Primary) {
                 // Position inside the image rect (in points)
                 let local_pos = pointer_pos - response.rect.min;
 
-                let texel = self.camera.surface_to_texel(local_pos, surface_size);
+                let texel = self
+                    .circuit_canvas
+                    .camera
+                    .surface_to_texel(local_pos, surface_size);
                 let (x, y) = (texel.x as u32, texel.y as u32);
                 if texel.x < 0. || texel.y < 0. || width <= x || height <= y {
                     self.cursor = None;
@@ -282,159 +427,26 @@ impl MyEguiApp {
                     self.cursor = Some((x, y));
                 }
             }
+
             if response.dragged_by(PointerButton::Secondary) {
-                self.camera.position -=
-                    response.drag_delta() * self.camera.texels_per_surface_pixel();
+                self.circuit_canvas.camera.position -=
+                    response.drag_delta() * self.circuit_canvas.camera.texels_per_surface_pixel();
             }
         }
-        // let mut scroll_delta = ui.input(|i| i.smooth_scroll_delta);
-        // self.camera.position -= scroll_delta * self.camera.texels_per_surface_pixel();
 
-        let uv_min = self.camera.surface_to_texel(Vec2::ZERO, surface_size) / tex_size;
-        let uv_max = self.camera.surface_to_texel(surface_size, surface_size) / tex_size;
-        let uv_size = uv_max - uv_min;
-
-        // Clone locals so we can move them into the paint callback:
-        let program = self.program;
-        let vertex_array = self.vertex_array;
-        let tex_image = self.tex_image;
-        let tex_nets = self.tex_nets;
-        let tex_state = self.tex_state;
-
-        let target_net = self
+        self.circuit_canvas.selected_net = self
             .cursor
-            .and_then(|(x, y)| self.circuit.image.pixel(x, y).net())
+            .and_then(|(x, y)| runtime.circuit.image.pixel(x, y).net())
             .unwrap_or(0);
 
+        // --- Draw Circuit ---
+        let render_callback = self.circuit_canvas.render_callback(rect);
         let callback = PaintCallback {
             rect,
             callback: Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
-                let gl = painter.gl();
-
-                use glow::*;
-
-                unsafe {
-                    gl.use_program(Some(program));
-
-                    gl.active_texture(glow::TEXTURE0);
-                    gl.bind_texture(glow::TEXTURE_2D, Some(tex_image));
-                    gl.uniform_1_i32(
-                        Some(&gl.get_uniform_location(program, "tex_circuit").unwrap()),
-                        0,
-                    );
-                    gl.active_texture(glow::TEXTURE1);
-                    gl.bind_texture(glow::TEXTURE_2D, Some(tex_nets));
-                    gl.uniform_1_i32(
-                        Some(&gl.get_uniform_location(program, "tex_nets").unwrap()),
-                        1,
-                    );
-                    gl.active_texture(glow::TEXTURE2);
-                    gl.bind_texture(glow::TEXTURE_BUFFER, Some(tex_state));
-                    gl.uniform_1_i32(
-                        Some(&gl.get_uniform_location(program, "tex_state").unwrap()),
-                        2,
-                    );
-
-                    gl.uniform_2_f32(
-                        Some(&gl.get_uniform_location(program, "uv_min").unwrap()),
-                        uv_min.x,
-                        uv_min.y,
-                    );
-                    gl.uniform_2_f32(
-                        Some(&gl.get_uniform_location(program, "uv_size").unwrap()),
-                        uv_size.x,
-                        uv_size.y,
-                    );
-
-                    let pixel_size = uv_size / surface_size;
-                    gl.uniform_2_f32(
-                        Some(&gl.get_uniform_location(program, "pixel_size").unwrap()),
-                        pixel_size.x,
-                        pixel_size.y,
-                    );
-
-                    gl.uniform_1_u32(
-                        Some(&gl.get_uniform_location(program, "target_net").unwrap()),
-                        target_net,
-                    );
-
-                    gl.bind_vertex_array(Some(vertex_array));
-                    gl.draw_arrays(glow::TRIANGLES, 0, 3);
-                }
+                render_callback(painter.gl());
             })),
         };
         ui.painter().add(callback);
-    }
-
-    fn init_shadersnew(gl: &glow::Context) -> (glow::Program, glow::VertexArray) {
-        let shader_version = if cfg!(target_arch = "wasm32") {
-            "#version 300 es"
-        } else {
-            "#version 330"
-        };
-
-        unsafe {
-            let program = gl.create_program().expect("Cannot create program");
-
-            let shader_sources = [
-                (
-                    "Vertex Shader",
-                    glow::VERTEX_SHADER,
-                    include_str!("shader.vert"),
-                ),
-                (
-                    "Fragment Shader",
-                    glow::FRAGMENT_SHADER,
-                    include_str!("shader.frag"),
-                ),
-            ];
-
-            let shaders: Vec<_> = shader_sources
-                .iter()
-                .map(|(shader_name, shader_type, shader_source)| {
-                    let shader = gl
-                        .create_shader(*shader_type)
-                        .expect("Cannot create shader");
-                    gl.shader_source(shader, &format!("{shader_version}\n{shader_source}"));
-                    gl.compile_shader(shader);
-                    assert!(
-                        gl.get_shader_compile_status(shader),
-                        "Failed to compile {shader_name}: {}",
-                        gl.get_shader_info_log(shader)
-                    );
-                    gl.attach_shader(program, shader);
-                    shader
-                })
-                .collect();
-
-            gl.link_program(program);
-            assert!(
-                gl.get_program_link_status(program),
-                "{}",
-                gl.get_program_info_log(program)
-            );
-
-            for shader in shaders {
-                gl.detach_shader(program, shader);
-                gl.delete_shader(shader);
-            }
-
-            let vertex_array = gl
-                .create_vertex_array()
-                .expect("Cannot create vertex array");
-
-            (program, vertex_array)
-        }
-    }
-
-    fn update_circuit_state_texture(&self, gl: &glow::Context) {
-        unsafe {
-            gl.bind_buffer(glow::TEXTURE_BUFFER, Some(self.buffer_state));
-            gl.buffer_sub_data_u8_slice(
-                glow::TEXTURE_BUFFER,
-                0,
-                bytemuck::cast_slice(&self.circuit_state),
-            );
-        }
     }
 }
