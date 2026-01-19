@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use eframe::{
-    egui::{self, Key, PaintCallback, PointerButton, Sense, Ui, Vec2},
+    egui::{self, Key, KeyboardShortcut, Modifiers, PaintCallback, PointerButton, Sense, Ui, Vec2},
     egui_glow,
     glow::{self, HasContext},
 };
@@ -28,9 +28,15 @@ fn main() {
 }
 
 struct MyEguiApp {
-    tex_image: glow::NativeTexture,
-    tex_nets: glow::NativeTexture,
+    tex_image: glow::Texture,
+    tex_nets: glow::Texture,
+    tex_state: glow::Texture,
+    buffer_state: glow::Buffer,
+
     circuit: Circuit,
+    circuit_state: Vec<bool>,
+    interpreter: CircuitInterpreter,
+
     cursor: Option<(u32, u32)>,
 
     program: glow::Program,
@@ -51,6 +57,10 @@ impl MyEguiApp {
             .to_rgb8();
 
         let circuit = Circuit::new(img);
+
+        let interpreter = CircuitInterpreter::default();
+        let mut circuit_state = Vec::new();
+        interpreter.initial_state(&circuit, &mut circuit_state);
 
         let tex_image = unsafe {
             let texture = gl.create_texture().unwrap();
@@ -89,6 +99,7 @@ impl MyEguiApp {
             use glow::*;
             gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_MIN_FILTER, NEAREST as i32);
             gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_MAG_FILTER, NEAREST as i32);
+            gl.tex_parameter_i32(TEXTURE_1D, TEXTURE_WRAP_S, CLAMP_TO_EDGE as i32);
 
             let raw_nets = bytemuck::cast_slice(circuit.image.nets());
             gl.tex_image_2d(
@@ -105,16 +116,40 @@ impl MyEguiApp {
             texture
         };
 
+        let buffer_state = unsafe {
+            let buffer = gl.create_buffer().unwrap();
+            gl.bind_buffer(glow::TEXTURE_BUFFER, Some(buffer));
+            gl.buffer_data_u8_slice(
+                glow::TEXTURE_BUFFER,
+                bytemuck::cast_slice(&circuit_state),
+                glow::DYNAMIC_DRAW,
+            );
+            buffer
+        };
+
+        let tex_state = unsafe {
+            let texture = gl.create_texture().unwrap();
+            gl.bind_texture(glow::TEXTURE_BUFFER, Some(texture));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            gl.tex_buffer(glow::TEXTURE_BUFFER, glow::R8UI, Some(buffer_state));
+            texture
+        };
+
         let (program, vertex_array) = Self::init_shadersnew(gl);
 
         let mut camera = Camera::new();
-        camera.position =
-            Vec2::new(circuit.image.width() as f32, circuit.image.height() as f32) / 2.;
+        let tex_size = Vec2::new(circuit.image.width() as f32, circuit.image.height() as f32);
+        camera.position = tex_size / 2.;
+        camera.set_surface_pixels_per_texel(500. / tex_size.y);
 
         Self {
             tex_image,
             tex_nets,
+            tex_state,
+            buffer_state,
+            circuit_state,
             circuit,
+            interpreter,
             cursor: None,
             program,
             vertex_array,
@@ -124,7 +159,9 @@ impl MyEguiApp {
 }
 
 impl eframe::App for MyEguiApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let gl = frame.gl().unwrap();
+
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
@@ -139,37 +176,7 @@ impl eframe::App for MyEguiApp {
 
                 egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
-                    .show(ui, |ui| {
-                        if let Some((x, y)) = self.cursor {
-                            ui.strong(format!("pos:   {x}, {y}"));
-
-                            let pixel = self.circuit.image.pixel(x, y);
-                            if let Some(net) = pixel.net() {
-                                ui.strong(format!("net: {:?}", net));
-
-                                if let Some(gate) = self.circuit.get_gate(net) {
-                                    ui.strong(format!("gate type: {:?}", gate.ty));
-                                    ui.strong(format!("gate inputs: {:?}", gate.inputs));
-                                    ui.strong(format!("gate outputs: {:?}", gate.outputs));
-                                }
-                            }
-
-                            if let Some(&color) =
-                                self.circuit.image.colors().get_pixel_checked(x, y)
-                            {
-                                ui.strong(format!("color: {:?}", color));
-                                ui.strong(format!(
-                                    "saturation: {:.0}%",
-                                    100. * hsv_saturation(color)
-                                ));
-                                ui.strong(format!("value: {:.0}%", 100. * hsv_value(color)));
-                            }
-
-                            ui.separator();
-                        }
-
-                        ui.strong(format!("net count: {:?}", self.circuit.net_count()));
-                    });
+                    .show(ui, |ui| self.left_panel(ctx, ui, gl));
             });
 
         egui::CentralPanel::default()
@@ -190,6 +197,50 @@ impl eframe::App for MyEguiApp {
 }
 
 impl MyEguiApp {
+    fn left_panel(&mut self, ctx: &egui::Context, ui: &mut Ui, gl: &glow::Context) {
+        if let Some((x, y)) = self.cursor {
+            ui.strong(format!("pos:   {x}, {y}"));
+
+            let pixel = self.circuit.image.pixel(x, y);
+            if let Some(net) = pixel.net() {
+                ui.strong(format!("net: {:?}", net));
+
+                if let Some(gate) = self.circuit.get_gate(net) {
+                    ui.strong(format!("gate type: {:?}", gate.ty));
+                    ui.strong(format!("gate inputs: {:?}", gate.inputs));
+                    ui.strong(format!("gate outputs: {:?}", gate.outputs));
+                }
+            }
+
+            if let Some(&color) = self.circuit.image.colors().get_pixel_checked(x, y) {
+                ui.strong(format!("color: {:?}", color));
+                ui.strong(format!("saturation: {:.0}%", 100. * hsv_saturation(color)));
+                ui.strong(format!("value: {:.0}%", 100. * hsv_value(color)));
+            }
+
+            ui.separator();
+        }
+
+        ui.strong(format!("net count: {:?}", self.circuit.net_count()));
+
+        ui.separator();
+
+        let shortcut = |ctx: &egui::Context, modifiers: Modifiers, key: Key| {
+            ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(modifiers, key)))
+        };
+
+        if ui.button("Reset ").clicked() || shortcut(ctx, Modifiers::NONE, Key::R) {
+            self.interpreter
+                .initial_state(&self.circuit, &mut self.circuit_state);
+            self.update_circuit_state_texture(gl);
+        }
+
+        if ui.button("Step ").clicked() || shortcut(ctx, Modifiers::NONE, Key::ArrowRight) {
+            self.interpreter
+                .step(&self.circuit, &mut self.circuit_state);
+            self.update_circuit_state_texture(gl);
+        }
+    }
     fn custom_painting(&mut self, ui: &mut Ui) {
         let (width, height) = (self.circuit.image.width(), self.circuit.image.height());
         let tex_size = Vec2::new(width as f32, height as f32);
@@ -248,6 +299,7 @@ impl MyEguiApp {
         let vertex_array = self.vertex_array;
         let tex_image = self.tex_image;
         let tex_nets = self.tex_nets;
+        let tex_state = self.tex_state;
 
         let target_net = self
             .cursor
@@ -276,6 +328,13 @@ impl MyEguiApp {
                         Some(&gl.get_uniform_location(program, "tex_nets").unwrap()),
                         1,
                     );
+                    gl.active_texture(glow::TEXTURE2);
+                    gl.bind_texture(glow::TEXTURE_BUFFER, Some(tex_state));
+                    gl.uniform_1_i32(
+                        Some(&gl.get_uniform_location(program, "tex_state").unwrap()),
+                        2,
+                    );
+
                     gl.uniform_2_f32(
                         Some(&gl.get_uniform_location(program, "uv_min").unwrap()),
                         uv_min.x,
@@ -365,6 +424,17 @@ impl MyEguiApp {
                 .expect("Cannot create vertex array");
 
             (program, vertex_array)
+        }
+    }
+
+    fn update_circuit_state_texture(&self, gl: &glow::Context) {
+        unsafe {
+            gl.bind_buffer(glow::TEXTURE_BUFFER, Some(self.buffer_state));
+            gl.buffer_sub_data_u8_slice(
+                glow::TEXTURE_BUFFER,
+                0,
+                bytemuck::cast_slice(&self.circuit_state),
+            );
         }
     }
 }

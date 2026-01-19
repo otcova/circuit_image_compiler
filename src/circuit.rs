@@ -52,7 +52,7 @@ impl Pixel {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Gate {
     pub ty: GateType,
     /// Gate-Gate contacts
@@ -73,15 +73,19 @@ impl Gate {
 
 pub struct Circuit {
     pub image: CircuitImage,
-    gates: Vec<Option<Gate>>,
+    gates: Vec<Gate>,
+
+    /// Count of nets that are not a gate.
+    /// Meaning that it's the number of wires including the two permanent NET_OFF/NET_ON.
+    ///
+    /// # Invariant
+    /// There are allways at least 2 wires (the NET_OFF and NET_ON) even if not in use.
+    wire_count: u32,
 }
 
 pub struct CircuitImage {
     colors: ImageBuffer<Rgb<u8>, Vec<u8>>,
     nets: Vec<u32>,
-    /// Invariant: There are allways at least 2 nets 0 (allways off) and 1 (allways on)
-    /// even if not in use.
-    net_count: u32,
 }
 
 impl CircuitImage {
@@ -89,7 +93,6 @@ impl CircuitImage {
     pub fn new(colors: ImageBuffer<Rgb<u8>, Vec<u8>>) -> CircuitImage {
         CircuitImage {
             nets: vec![NET_OFF; colors.width() as usize * colors.height() as usize],
-            net_count: 2,
             colors,
         }
     }
@@ -105,10 +108,6 @@ impl CircuitImage {
 
     pub fn nets(&self) -> &[u32] {
         &self.nets
-    }
-
-    pub fn net_count(&self) -> u32 {
-        self.net_count
     }
 
     pub fn width(&self) -> u32 {
@@ -184,6 +183,7 @@ impl Circuit {
 
         // A non-sparse map from net (u32) to Gate
         let mut gates = Vec::with_capacity(INIT_CAPACITY);
+        let mut gate_count: u32 = 0;
 
         let mut net_aliases = UnionFind::new(2); // OFF and ON nets
 
@@ -245,6 +245,7 @@ impl Circuit {
                     // empty slots with some placeholders.
                     gates.resize(current_net as usize, None);
                     gates.push(Some(Gate::new(ty)));
+                    gate_count += 1;
                 }
 
                 image.set_net(x, y, current_net);
@@ -651,60 +652,178 @@ impl Circuit {
             }
         }
 
+        // // --- Permanent Gate Optimization ---
+        // for _ in 0..17 {
+        //     for (gate_net, gate) in gates.iter_mut().enumerate() {
+        //         let gate_net = gate_net as u32;
+        //         let Some(gate) = gate else {
+        //             continue;
+        //         };
+        //
+        //         // Apply aliases to inputs
+        //         for _ in 0..gate.inputs.len() {
+        //             let net = net_aliases.root(gate.inputs.swap_remove(0));
+        //             if !gate.inputs.contains(&net) {
+        //                 gate.inputs.push(net);
+        //             }
+        //         }
+        //
+        //         // Apply aliases to outputs & power the gate
+        //         for _ in 0..gate.outputs.len() {
+        //             let net = net_aliases.root(gate.outputs.swap_remove(0));
+        //             if !gate.outputs.contains(&net) {
+        //                 gate.outputs.push(net);
+        //
+        //                 if net == NET_ON {
+        //                     net_aliases.alias(gate_net, NET_ON);
+        //                 }
+        //             }
+        //         }
+        //
+        //         if gate.outputs.is_empty() {
+        //             net_aliases.alias(gate_net, NET_OFF);
+        //         }
+        //     }
+        //     for gate in gates.iter_mut().flatten() {
+        //         // if permanently connected => connect now
+        //         let outputs_connected = match gate.ty {
+        //             GateType::Passive => gate.inputs[..] == [NET_ON],
+        //             GateType::Active => gate.inputs.is_empty() || gate.inputs.contains(&NET_OFF),
+        //         };
+        //         if outputs_connected {
+        //             for out in gate.outputs.windows(2) {
+        //                 net_aliases.alias(out[0], out[1]);
+        //             }
+        //         }
+        //     }
+        // }
+
         // --- Apply net aliases ---
-        let rename_map = {
+        let mut dense_gates = Vec::with_capacity(gate_count as usize);
+        let (rename_map, net_count) = {
             let (mut net_aliases, net_count) = net_aliases.into_compact_rename();
-            image.net_count = net_count;
 
             // Rename nets so that all gates are together at the back
             let mut rename_map: Vec<_> = (0..net_count).collect();
-            let mut right = net_count;
+            let mut gate_net = net_count - gate_count;
             for (net, net_alias) in net_aliases.iter_mut().enumerate() {
                 let current = rename_map[*net_alias as usize];
-                if gates.get(net).is_some_and(|g| g.is_some()) {
-                    right -= 1;
-                    rename_map[current as usize] = right;
-                    rename_map[right as usize] = current;
-                    *net_alias = right;
+
+                if let Some(gate) = gates.get_mut(net).and_then(|g| g.take()) {
+                    rename_map[current as usize] = gate_net;
+                    rename_map[gate_net as usize] = current;
+                    *net_alias = gate_net;
+                    gate_net += 1;
+                    dense_gates.push(gate);
                 } else {
                     *net_alias = current;
                 }
             }
-            net_aliases
+            (net_aliases, net_count)
         };
 
         for net in &mut image.nets {
-            if gates.get(*net as usize).is_none_or(|g| g.is_none()) {
+            *net = rename_map[*net as usize];
+        }
+
+        for gate in &mut dense_gates {
+            for net in &mut gate.inputs {
+                *net = rename_map[*net as usize];
+            }
+            for net in &mut gate.outputs {
                 *net = rename_map[*net as usize];
             }
         }
-        for gate in gates.iter_mut().flatten() {
-            for _ in 0..gate.inputs.len() {
-                let net = rename_map[gate.inputs.swap_remove(0) as usize];
-                if !gate.inputs.contains(&net) {
-                    gate.inputs.push(net);
-                }
-            }
-            for _ in 0..gate.outputs.len() {
-                let net = rename_map[gate.outputs.swap_remove(0) as usize];
-                if !gate.outputs.contains(&net) {
-                    gate.outputs.push(net);
-                }
-            }
-        }
 
-        Circuit { image, gates }
+        Circuit {
+            image,
+            gates: dense_gates,
+            wire_count: net_count - gate_count,
+        }
+    }
+
+    pub fn gate_count(&self) -> u32 {
+        self.gates.len() as u32
+    }
+
+    pub fn wire_count(&self) -> u32 {
+        self.wire_count
     }
 
     pub fn net_count(&self) -> u32 {
-        self.image.net_count()
+        self.wire_count + self.gate_count()
     }
 
     pub fn get_gate(&self, net: u32) -> Option<&Gate> {
-        self.gates.get(net as usize).and_then(|r| r.as_ref())
+        if self.wire_count <= net {
+            self.gates.get((net - self.wire_count) as usize)
+        } else {
+            None
+        }
     }
 }
 
+#[derive(Default)]
+pub struct CircuitInterpreter {
+    wire_connections: UnionFind,
+}
+
+impl CircuitInterpreter {
+    /// Writes the on/off initial state of all the nets of the circuit.
+    pub fn initial_state(&self, circuit: &Circuit, state: &mut Vec<bool>) {
+        state.resize(circuit.net_count() as usize, false);
+        state.fill(false);
+        state[NET_ON as usize] = true;
+
+        // Write gate state
+        for (gate_i, gate) in circuit.gates.iter().enumerate() {
+            let gate_net = gate_i + circuit.wire_count() as usize;
+            state[gate_net] = gate.outputs.contains(&NET_ON);
+        }
+    }
+
+    /// Perfoms a single step. Equivalent to `update_wires()` + `update_gates()`
+    pub fn step(&mut self, circuit: &Circuit, net_state: &mut [bool]) {
+        debug_assert!(circuit.net_count() as usize == net_state.len());
+
+        self.update_wires(circuit, net_state);
+        self.update_gates(circuit, net_state);
+    }
+
+    /// Given the state of the gates, compute the state of the wires.
+    pub fn update_wires(&mut self, circuit: &Circuit, net_state: &mut [bool]) {
+        self.wire_connections.clear();
+        self.wire_connections.extend(circuit.net_count()); // TODO: Why wire_count does not work
+
+        // Connect nets from gates
+        for gate in &circuit.gates {
+            let toggled = gate.inputs.iter().all(|&net| net_state[net as usize]);
+            match (gate.ty, toggled) {
+                (GateType::Active, false) | (GateType::Passive, true) => {
+                    for net in gate.outputs.windows(2) {
+                        self.wire_connections.alias(net[0], net[1]);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Write wire state
+        for wire_net in 2..circuit.wire_count() {
+            net_state[wire_net as usize] = self.wire_connections.root(wire_net) == NET_ON;
+        }
+    }
+
+    /// Given the state of the wires, compute the state of the gates.
+    pub fn update_gates(&mut self, circuit: &Circuit, net_state: &mut [bool]) {
+        for (gate_i, gate) in circuit.gates.iter().enumerate() {
+            let gate_net = gate_i + circuit.wire_count() as usize;
+            net_state[gate_net] = gate.outputs.iter().any(|&net| net_state[net as usize]);
+        }
+    }
+}
+
+#[derive(Default)]
 struct UnionFind {
     // Invariant: parents[i] <= i
     // Invariant: len <= u32::MAX + 1
@@ -719,6 +838,11 @@ impl UnionFind {
         }
     }
 
+    /// Removes all nodes
+    pub fn clear(&mut self) {
+        self.parents.clear();
+    }
+
     pub fn from_vec_unchecked(parents: Vec<u32>) -> UnionFind {
         UnionFind { parents }
     }
@@ -726,12 +850,7 @@ impl UnionFind {
     /// Crates n consecutive new nodes.
     /// Returns first node created.
     pub fn extend(&mut self, n: u32) -> u32 {
-        let first = self.parents.len();
-
-        // Check Invariant "len <= u32::MAX + 1"
-        debug_assert!(n <= u32::MAX - (first - 1) as u32);
-
-        let first = first as u32;
+        let first = self.parents.len() as u32;
         self.parents.extend(first..first + n);
         first
     }

@@ -2,6 +2,8 @@ precision mediump float;
 
 uniform sampler2D tex_circuit;
 uniform usampler2D tex_nets;
+uniform usamplerBuffer tex_state;
+
 uniform vec2 pixel_size;
 uniform uint target_net;
 
@@ -16,7 +18,6 @@ void main() {
     ivec2 puv = clamp(ivec2(uv * vec2(tex_size)), ivec2(0), tex_size);
     uint net = texelFetch(tex_nets, puv, 0).r;
 
-
     // 8 Neighbours
     #define coord(_x, _y) clamp(ivec2((uv + vec2(_x, _y)) * vec2(tex_size)), ivec2(0), tex_size)
     uint n0 = texelFetch(tex_nets, coord(-s.x, -s.y), 0).r;
@@ -28,17 +29,27 @@ void main() {
     uint n6 = texelFetch(tex_nets, coord( 0,    s.y), 0).r;
     uint n7 = texelFetch(tex_nets, coord( s.x,  s.y), 0).r;
 
+    uint net_state = texelFetch(tex_state, int(net)).r;
+
     out_color = texture(tex_circuit, uv);
+
+    if (net_state == 0u) {
+        out_color.rgb = out_color.rgb / 1.5;
+    } else {
+        out_color.rgb = out_color.rgb * 1.5;
+    }
 
     if (target_net > 0u) {
         if (target_net == net) {
-            // ivec2 p = ivec2(gl_FragCoord);
-            // // if (p.x % 2 == 0 && p.y % 2 == 0) 
-            // // if ((p.x + p.y / 2) % 2 == 0 && p.y % 2 == 0) 
-            // if (p.x % 2 == p.y % 2)
-            //     out_color.rgb += vec3(0.5);
-            // else
-                out_color.rgb = out_color.rgb * 2.0;
+            ivec2 p = ivec2(gl_FragCoord);
+            // if (p.x % 2 == 0 && p.y % 2 == 0) 
+            if ((p.x + p.y / 2) % 2 == 0 && p.y % 2 == 0) {
+            // if (p.x % 2 == p.y % 2){
+                out_color.rgb += vec3(0.3);
+        } else {
+
+                out_color.rgb -= vec3(0.1);
+            }
         }
         else if (target_net == n0 || target_net == n1
               || target_net == n2 || target_net == n3

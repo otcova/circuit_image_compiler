@@ -8,7 +8,7 @@ pub struct Camera {
     pub position: Vec2,
 
     /// Uniform scale factor (surface pixels per texel)
-    pub scale: f32,
+    scale: f32,
 }
 
 #[allow(dead_code)]
@@ -25,6 +25,12 @@ impl Camera {
     /// This value is always uniform (no X/Y deformation).
     pub fn set_surface_pixels_per_texel(&mut self, surface_pixels_per_texel: f32) {
         self.scale = surface_pixels_per_texel;
+    }
+
+    /// Sets the base scale so that one surface pixel maps to ne texel.
+    /// This value is always uniform (no X/Y deformation).
+    pub fn set_texels_per_surface_pixels(&mut self, texels_per_surface_pixels: f32) {
+        self.scale = 1. / texels_per_surface_pixels;
     }
 
     pub fn surface_pixels_per_texel(&self) -> f32 {
