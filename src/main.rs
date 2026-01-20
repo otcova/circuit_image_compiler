@@ -7,10 +7,11 @@ use std::{
 
 use eframe::{
     egui::{
-        self, Key, KeyboardShortcut, Modifiers, PaintCallback, PointerButton, ScrollArea, Sense, Ui,
+        self, CollapsingHeader, Key, KeyboardShortcut, Modifiers, PaintCallback, PointerButton,
+        RichText, ScrollArea, Sense, Ui,
     },
     egui_glow,
-    glow::{self},
+    glow::{self, HasContext},
 };
 use image::ImageReader;
 
@@ -127,6 +128,13 @@ impl eframe::App for MyEguiApp {
             .show(ctx, |ui| {
                 self.show_circuit(ui);
             });
+
+        unsafe {
+            gl.bind_buffer(glow::TEXTURE_BUFFER, None);
+            gl.bind_texture(glow::TEXTURE_BUFFER, None);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.use_program(None);
+        }
     }
 
     fn on_exit(&mut self, gl: Option<&glow::Context>) {
@@ -309,8 +317,11 @@ impl MyEguiApp {
             return;
         };
 
-        ui.strong(format!("width: {:?}", runtime.circuit.image.width()));
-        ui.strong(format!("height: {:?}", runtime.circuit.image.height()));
+        ui.strong(format!(
+            "size: {:?} x {:?}",
+            runtime.circuit.image.width(),
+            runtime.circuit.image.height()
+        ));
         ui.strong(format!("wires: {:?}", runtime.circuit.wire_count() - 2));
         ui.strong(format!("gates: {:?}", runtime.circuit.gate_count()));
     }
@@ -320,10 +331,20 @@ impl MyEguiApp {
         let Some(runtime) = &self.circuit_runtime else {
             return;
         };
+        let Some(&color) = runtime.circuit.image.colors().get_pixel_checked(x, y) else {
+            return;
+        };
 
         self.separator(ui);
         ui.heading("Net Info");
-        ui.strong(format!("pos:   {x}, {y}"));
+
+        CollapsingHeader::new(RichText::new(format!("pixel  x: {x}  y: {y}")).strong())
+            .id_salt("Net Info/pos")
+            .show(ui, |ui| {
+                ui.strong(format!("rgb: {}, {}, {}", color[0], color[1], color[2]));
+                ui.strong(format!("saturation: {:.0}%", 100. * hsv_saturation(color)));
+                ui.strong(format!("value: {:.0}%", 100. * hsv_value(color)));
+            });
 
         let pixel = runtime.circuit.image.pixel(x, y);
         if let Some(net) = pixel.net() {
@@ -334,12 +355,6 @@ impl MyEguiApp {
                 ui.strong(format!("gate inputs: {:?}", gate.inputs));
                 ui.strong(format!("gate outputs: {:?}", gate.outputs));
             }
-        }
-
-        if let Some(&color) = runtime.circuit.image.colors().get_pixel_checked(x, y) {
-            ui.strong(format!("color: {:?}", color));
-            ui.strong(format!("saturation: {:.0}%", 100. * hsv_saturation(color)));
-            ui.strong(format!("value: {:.0}%", 100. * hsv_value(color)));
         }
     }
 

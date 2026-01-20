@@ -86,14 +86,58 @@ pub struct Circuit {
 pub struct CircuitImage {
     colors: ImageBuffer<Rgb<u8>, Vec<u8>>,
     nets: Vec<u32>,
+
+    power_color: Rgb<u8>,
+    active_gate_color: Rgb<u8>,
+    passive_gate_color: Rgb<u8>,
 }
 
 impl CircuitImage {
+    /// Computes a score that represents how much the color matches the inteded color for
+    /// (power, active gate, passive gate).
+    fn color_match_score(color: Rgb<u8>) -> (i32, i32, i32) {
+        let (r, g, b) = (color[0] as i32, color[1] as i32, color[2] as i32);
+        (r - g.max(b), g - r.max(b), b - r.max(g))
+    }
+
     /// Initializes a new circuit image with all pixels set to NET_OFF.
     pub fn new(colors: ImageBuffer<Rgb<u8>, Vec<u8>>) -> CircuitImage {
+        // Initialize with lowerbound color match score.
+        let mut power_max_score = 0;
+        let mut active_gate_max_score = 0;
+        let mut passive_gate_max_score = 0;
+
+        // Configure default colors in case none is found with enouch match score.
+        let mut power_color = Rgb([255, 0, 0]);
+        let mut active_gate_color = Rgb([0, 255, 0]);
+        let mut passive_gate_color = Rgb([0, 0, 255]);
+
+        // Scan image to find power & gate colors
+        for &pixel in colors.pixels() {
+            let (power, active, passive) = Self::color_match_score(pixel);
+
+            if power >= active && power >= passive {
+                if power > power_max_score {
+                    power_max_score = power;
+                    power_color = pixel;
+                }
+            } else if active >= passive {
+                if active > active_gate_max_score {
+                    active_gate_max_score = active;
+                    active_gate_color = pixel;
+                }
+            } else if passive > passive_gate_max_score {
+                passive_gate_max_score = passive;
+                passive_gate_color = pixel;
+            }
+        }
+
         CircuitImage {
             nets: vec![NET_OFF; colors.width() as usize * colors.height() as usize],
             colors,
+            power_color,
+            active_gate_color,
+            passive_gate_color,
         }
     }
 
@@ -129,19 +173,19 @@ impl CircuitImage {
         };
         let index = x as usize + y as usize * self.width() as usize;
 
-        if hsv_value(color) <= 0.15 {
+        if hsv_value(color) <= 0.20 {
             Pixel::Insulator
-        } else if Rgb::<u8>([0, 166, 47]) == color {
+        } else if self.active_gate_color == color {
             Pixel::Gate {
                 ty: GateType::Active,
                 net: self.nets[index],
             }
-        } else if Rgb::<u8>([0, 80, 152]) == color {
+        } else if self.passive_gate_color == color {
             Pixel::Gate {
                 ty: GateType::Passive,
                 net: self.nets[index],
             }
-        } else if Rgb::<u8>([220, 20, 20]) == color {
+        } else if self.power_color == color {
             Pixel::Power
         } else {
             let index = x as usize + y as usize * self.width() as usize;
@@ -771,8 +815,8 @@ pub struct CircuitInterpreter {
 impl CircuitInterpreter {
     /// Writes the on/off initial state of all the nets of the circuit.
     pub fn initial_state(&self, circuit: &Circuit, state: &mut Vec<bool>) {
+        state.clear();
         state.resize(circuit.net_count() as usize, false);
-        state.fill(false);
         state[NET_ON as usize] = true;
 
         // Write gate state

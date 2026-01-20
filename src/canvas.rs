@@ -23,6 +23,8 @@ pub struct CircuitCanvas {
 
 impl CircuitCanvas {
     pub fn new(gl: &glow::Context) -> Self {
+        check_for_gl_error!(gl);
+
         let (shader_program, vertex_array) = init_shaders(gl);
 
         let tex_image = unsafe {
@@ -217,6 +219,11 @@ impl CircuitCanvas {
             gl.bind_vertex_array(Some(vertex_array));
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
             check_for_gl_error!(gl);
+
+            gl.bind_buffer(glow::TEXTURE_BUFFER, None);
+            gl.bind_texture(glow::TEXTURE_BUFFER, None);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.use_program(None);
         }
     }
 }
