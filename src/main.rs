@@ -54,6 +54,7 @@ struct MyEguiApp {
 
 struct CircuitRuntime {
     name: String,
+    path: PathBuf,
     circuit: Circuit,
     circuit_state: Vec<bool>,
     interpreter: CircuitInterpreter,
@@ -193,12 +194,14 @@ impl MyEguiApp {
         Ok(())
     }
 
-    fn load_circuit(&mut self, gl: &glow::Context, path: &Path) {
+    fn load_circuit(&mut self, gl: &glow::Context, path: impl Into<PathBuf>) {
         self.circuit_runtime = None;
         self.load_circuit_error_message = None;
 
+        let path = path.into();
+
         if path.is_dir() {
-            if let Err(error) = self.open_folder(path) {
+            if let Err(error) = self.open_folder(&path) {
                 self.load_circuit_error_message = Some(format!(
                     "Unable to open the folder: {}\n{}",
                     path.display(),
@@ -213,7 +216,7 @@ impl MyEguiApp {
             .map(|s| s.to_string_lossy().into())
             .unwrap_or_else(|| "circuit".into());
 
-        let img = match ImageReader::open(path) {
+        let img = match ImageReader::open(&path) {
             Ok(img) => match img.decode() {
                 Ok(img) => img.to_rgb8(),
                 Err(error) => {
@@ -251,6 +254,7 @@ impl MyEguiApp {
 
         self.circuit_runtime = Some(CircuitRuntime {
             name,
+            path,
             circuit,
             circuit_state,
             interpreter,
@@ -295,7 +299,7 @@ impl MyEguiApp {
                     });
 
                 if let Some(path) = new_selection {
-                    self.load_circuit(gl, &path.to_path_buf());
+                    self.load_circuit(gl, path.clone());
                 }
             }
         });
@@ -359,15 +363,11 @@ impl MyEguiApp {
     }
 
     fn show_execution_controls(&mut self, ctx: &egui::Context, ui: &mut Ui, gl: &glow::Context) {
-        if self.circuit_runtime.is_none() {
-            return;
-        }
-
-        self.separator(ui);
-
-        let Some(runtime) = &mut self.circuit_runtime else {
+        let Some(runtime) = &self.circuit_runtime else {
             return;
         };
+
+        self.separator(ui);
 
         ui.heading("Execution");
 
@@ -375,7 +375,16 @@ impl MyEguiApp {
             ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(modifiers, key)))
         };
 
-        if ui.button("Reset ").clicked() || shortcut(ctx, Modifiers::NONE, Key::R) {
+        if ui.button("Reload ").clicked() || shortcut(ctx, Modifiers::NONE, Key::R) {
+            let camera = self.circuit_canvas.camera;
+            self.load_circuit(gl, runtime.path.clone());
+            self.circuit_canvas.camera = camera;
+
+            // Get runtime mutably
+            let Some(runtime) = &mut self.circuit_runtime else {
+                return;
+            };
+
             runtime
                 .interpreter
                 .initial_state(&runtime.circuit, &mut runtime.circuit_state);
@@ -384,6 +393,11 @@ impl MyEguiApp {
         }
 
         if ui.button("Step ").clicked() || shortcut(ctx, Modifiers::NONE, Key::ArrowRight) {
+            // Get runtime mutably
+            let Some(runtime) = &mut self.circuit_runtime else {
+                return;
+            };
+
             runtime
                 .interpreter
                 .step(&runtime.circuit, &mut runtime.circuit_state);

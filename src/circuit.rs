@@ -817,25 +817,26 @@ impl CircuitInterpreter {
     pub fn initial_state(&self, circuit: &Circuit, state: &mut Vec<bool>) {
         state.clear();
         state.resize(circuit.net_count() as usize, false);
-        state[NET_ON as usize] = true;
-
-        // Write gate state
-        for (gate_i, gate) in circuit.gates.iter().enumerate() {
-            let gate_net = gate_i + circuit.wire_count() as usize;
-            state[gate_net] = gate.outputs.contains(&NET_ON);
-        }
+        // state[NET_ON as usize] = true;
+        //
+        // // Write gate state
+        // for (gate_i, gate) in circuit.gates.iter().enumerate() {
+        //     let gate_net = gate_i + circuit.wire_count() as usize;
+        //     state[gate_net] = gate.outputs.contains(&NET_ON);
+        // }
     }
 
     /// Perfoms a single step. Equivalent to `update_wires()` + `update_gates()`
     pub fn step(&mut self, circuit: &Circuit, net_state: &mut [bool]) {
-        debug_assert!(circuit.net_count() as usize == net_state.len());
-
         self.update_wires(circuit, net_state);
         self.update_gates(circuit, net_state);
     }
 
     /// Given the state of the gates, compute the state of the wires.
     pub fn update_wires(&mut self, circuit: &Circuit, net_state: &mut [bool]) {
+        debug_assert!(circuit.net_count() as usize == net_state.len());
+        net_state[NET_ON as usize] = true;
+
         self.wire_connections.clear();
         self.wire_connections.extend(circuit.net_count()); // TODO: Why wire_count does not work
 
@@ -860,6 +861,7 @@ impl CircuitInterpreter {
 
     /// Given the state of the wires, compute the state of the gates.
     pub fn update_gates(&mut self, circuit: &Circuit, net_state: &mut [bool]) {
+        debug_assert!(circuit.net_count() as usize == net_state.len());
         for (gate_i, gate) in circuit.gates.iter().enumerate() {
             let gate_net = gate_i + circuit.wire_count() as usize;
             net_state[gate_net] = gate.outputs.iter().any(|&net| net_state[net as usize]);
