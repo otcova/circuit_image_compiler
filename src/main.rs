@@ -1,10 +1,3 @@
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
-
 use eframe::{
     egui::{
         self, CollapsingHeader, Key, KeyboardShortcut, Modifiers, PaintCallback, PointerButton,
@@ -14,15 +7,20 @@ use eframe::{
     glow::{self, HasContext},
 };
 use image::ImageReader;
-
-mod camera;
-mod canvas;
-mod circuit;
-
-use canvas::*;
-use circuit::*;
 use native_dialog::DialogBuilder;
 use smallvec::SmallVec;
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use circuit::*;
+use circuit_canvas::*;
+
+mod circuit;
+mod circuit_canvas;
 
 fn main() {
     env_logger::init();
@@ -57,7 +55,7 @@ struct CircuitRuntime {
     path: PathBuf,
     circuit: Circuit,
     circuit_state: Vec<bool>,
-    interpreter: CircuitInterpreter,
+    interpreter: UnoptimizedCircuitInterpreter,
 }
 
 impl MyEguiApp {
@@ -244,10 +242,10 @@ impl MyEguiApp {
         };
 
         let circuit = Circuit::new(img);
-        let interpreter = CircuitInterpreter::default();
+        let interpreter = UnoptimizedCircuitInterpreter::default();
 
         let mut circuit_state = Vec::new();
-        interpreter.initial_state(&circuit, &mut circuit_state);
+        circuit.initial_state(&mut circuit_state);
 
         self.circuit_canvas.load_circuit(gl, &circuit);
         self.circuit_canvas.load_circuit_state(gl, &circuit_state);
@@ -356,8 +354,8 @@ impl MyEguiApp {
 
             if let Some(gate) = runtime.circuit.get_gate(net) {
                 ui.strong(format!("gate type: {:?}", gate.ty));
-                ui.strong(format!("gate inputs: {:?}", gate.inputs));
-                ui.strong(format!("gate outputs: {:?}", gate.outputs));
+                ui.strong(format!("gate controls: {:?}", gate.controls));
+                ui.strong(format!("gate wires: {:?}", gate.wires));
             }
         }
     }
@@ -375,9 +373,16 @@ impl MyEguiApp {
             ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(modifiers, key)))
         };
 
-        if ui.button("Reload ").clicked() || shortcut(ctx, Modifiers::NONE, Key::R) {
+        if ui.button("Restart ").clicked() || shortcut(ctx, Modifiers::NONE, Key::R) {
             let camera = self.circuit_canvas.camera;
-            self.load_circuit(gl, runtime.path.clone());
+            let path = runtime.path.clone();
+            let previous_runtime = self.circuit_runtime.take();
+
+            self.load_circuit(gl, path);
+            self.load_circuit_error_message = None;
+
+            // Restore state
+            self.circuit_runtime = self.circuit_runtime.take().or(previous_runtime);
             self.circuit_canvas.camera = camera;
 
             // Get runtime mutably
@@ -385,14 +390,15 @@ impl MyEguiApp {
                 return;
             };
 
-            runtime
-                .interpreter
-                .initial_state(&runtime.circuit, &mut runtime.circuit_state);
+            runtime.circuit.initial_state(&mut runtime.circuit_state);
             self.circuit_canvas
                 .load_circuit_state(gl, &runtime.circuit_state);
         }
 
-        if ui.button("Step ").clicked() || shortcut(ctx, Modifiers::NONE, Key::ArrowRight) {
+        if ui.button("Step ").clicked()
+            || shortcut(ctx, Modifiers::NONE, Key::ArrowRight)
+            || shortcut(ctx, Modifiers::NONE, Key::S)
+        {
             // Get runtime mutably
             let Some(runtime) = &mut self.circuit_runtime else {
                 return;

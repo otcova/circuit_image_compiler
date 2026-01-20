@@ -1,10 +1,13 @@
+use crate::circuit::Circuit;
 use eframe::{
     egui::{self, Vec2},
     egui_glow::check_for_gl_error,
     glow::{self, HasContext},
 };
 
-use crate::{camera::Camera, circuit::Circuit};
+pub use camera::*;
+
+mod camera;
 
 pub struct CircuitCanvas {
     tex_size: Vec2,

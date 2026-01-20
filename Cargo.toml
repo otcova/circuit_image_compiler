@@ -15,6 +15,8 @@ env_logger = "0.11" # Print debug info to terminal
 
 inkwell = { version = "0.8", features = ["llvm20-1"], optional = true }
 cranelift = { version = "0.127", optional = true }
+cranelift-module = { version = "0.127", optional = true }
+cranelift-jit = { version = "0.127", optional = true }
 
 [patch.crates-io]
 # Use features that are not published in crates-io.
@@ -23,7 +25,7 @@ glow = { git = "https://github.com/grovesNL/glow", rev = "d645b97" }
 [features]
 default = ["cranelift"]
 
-cranelift = ["dep:cranelift"]
+cranelift = ["dep:cranelift", "dep:cranelift-module", "dep:cranelift-jit"]
 llvm_dyn = ["inkwell/llvm20-1-force-dynamic"]
 llvm = ["inkwell/llvm20-1-force-static"]
 
