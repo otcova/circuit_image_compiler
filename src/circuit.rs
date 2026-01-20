@@ -93,6 +93,10 @@ pub struct CircuitImage {
 }
 
 impl CircuitImage {
+    // 20% value threshold for the colors that are considered insulators.
+    // (Comparison is rounded down to 2 digits => add 0.5% to max)
+    const INSULATOR_COLOR_MAX_VALUE: f32 = 0.205;
+
     /// Computes a score that represents how much the color matches the inteded color for
     /// (power, active gate, passive gate).
     fn color_match_score(color: Rgb<u8>) -> (i32, i32, i32) {
@@ -173,7 +177,7 @@ impl CircuitImage {
         };
         let index = x as usize + y as usize * self.width() as usize;
 
-        if hsv_value(color) <= 0.20 {
+        if hsv_value(color) < Self::INSULATOR_COLOR_MAX_VALUE {
             Pixel::Insulator
         } else if self.active_gate_color == color {
             Pixel::Gate {
@@ -695,52 +699,6 @@ impl Circuit {
                 }
             }
         }
-
-        // // --- Permanent Gate Optimization ---
-        // for _ in 0..17 {
-        //     for (gate_net, gate) in gates.iter_mut().enumerate() {
-        //         let gate_net = gate_net as u32;
-        //         let Some(gate) = gate else {
-        //             continue;
-        //         };
-        //
-        //         // Apply aliases to inputs
-        //         for _ in 0..gate.inputs.len() {
-        //             let net = net_aliases.root(gate.inputs.swap_remove(0));
-        //             if !gate.inputs.contains(&net) {
-        //                 gate.inputs.push(net);
-        //             }
-        //         }
-        //
-        //         // Apply aliases to outputs & power the gate
-        //         for _ in 0..gate.outputs.len() {
-        //             let net = net_aliases.root(gate.outputs.swap_remove(0));
-        //             if !gate.outputs.contains(&net) {
-        //                 gate.outputs.push(net);
-        //
-        //                 if net == NET_ON {
-        //                     net_aliases.alias(gate_net, NET_ON);
-        //                 }
-        //             }
-        //         }
-        //
-        //         if gate.outputs.is_empty() {
-        //             net_aliases.alias(gate_net, NET_OFF);
-        //         }
-        //     }
-        //     for gate in gates.iter_mut().flatten() {
-        //         // if permanently connected => connect now
-        //         let outputs_connected = match gate.ty {
-        //             GateType::Passive => gate.inputs[..] == [NET_ON],
-        //             GateType::Active => gate.inputs.is_empty() || gate.inputs.contains(&NET_OFF),
-        //         };
-        //         if outputs_connected {
-        //             for out in gate.outputs.windows(2) {
-        //                 net_aliases.alias(out[0], out[1]);
-        //             }
-        //         }
-        //     }
-        // }
 
         // --- Apply net aliases ---
         let mut dense_gates = Vec::with_capacity(gate_count as usize);
