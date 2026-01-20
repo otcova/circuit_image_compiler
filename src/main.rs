@@ -11,14 +11,17 @@ use native_dialog::DialogBuilder;
 use smallvec::SmallVec;
 use std::{
     collections::BTreeMap,
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
+use bench::*;
 use circuit::*;
 use circuit_canvas::*;
 
+mod bench;
 mod circuit;
 mod circuit_canvas;
 
@@ -56,6 +59,8 @@ struct CircuitRuntime {
     circuit: Circuit,
     circuit_state: Vec<bool>,
     interpreter: UnoptimizedCircuitInterpreter,
+    /// Seconds that the circuit needs to run a step
+    step_time: Duration,
 }
 
 impl MyEguiApp {
@@ -242,13 +247,19 @@ impl MyEguiApp {
         };
 
         let circuit = Circuit::new(img);
-        let interpreter = UnoptimizedCircuitInterpreter::default();
+        let mut interpreter = UnoptimizedCircuitInterpreter::default();
 
-        let mut circuit_state = Vec::new();
+        let mut circuit_state = CircuitStateBuf::new();
         circuit.initial_state(&mut circuit_state);
 
         self.circuit_canvas.load_circuit(gl, &circuit);
         self.circuit_canvas.load_circuit_state(gl, &circuit_state);
+
+        let step_time = bench_time(
+            || interpreter.step(&circuit, &mut circuit_state),
+            Duration::from_millis(100),
+        );
+        circuit.initial_state(&mut circuit_state);
 
         self.circuit_runtime = Some(CircuitRuntime {
             name,
@@ -256,6 +267,7 @@ impl MyEguiApp {
             circuit,
             circuit_state,
             interpreter,
+            step_time,
         });
     }
 
@@ -326,6 +338,9 @@ impl MyEguiApp {
         ));
         ui.strong(format!("wires: {:?}", runtime.circuit.wire_count() - 2));
         ui.strong(format!("gates: {:?}", runtime.circuit.gate_count()));
+
+        let rate = 1. / runtime.step_time.as_secs_f32();
+        ui.strong(format!("steps/s: {}", SiValue(rate)));
     }
 
     fn show_selected_net_info(&mut self, ui: &mut Ui) {
@@ -483,5 +498,32 @@ impl MyEguiApp {
             })),
         };
         ui.painter().add(callback);
+    }
+}
+
+struct SiValue(f32);
+
+impl fmt::Display for SiValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const SIG_FIGS: i32 = 3;
+
+        let value = self.0;
+        let abs = value.abs();
+
+        let prefixes = [(1e12, "T"), (1e9, "G"), (1e6, "M"), (1e3, "k")];
+
+        let (scaled, suffix) = prefixes
+            .iter()
+            .find(|(factor, _)| abs >= *factor)
+            .map(|(factor, suffix)| (value / factor, *suffix))
+            .unwrap_or((value, ""));
+
+        // Number of digits before the decimal point
+        let int_digits = scaled.abs().log10().floor() as i32 + 1;
+
+        // Precision needed to reach SIG_FIGS
+        let precision = (SIG_FIGS - int_digits).max(0) as usize;
+
+        write!(f, "{:.*}{}", precision, scaled, suffix)
     }
 }

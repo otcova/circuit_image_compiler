@@ -86,8 +86,8 @@ pub struct Circuit {
     wire_count: u32,
 }
 
-type CircuitStateBuf = Vec<bool>;
-type CircuitState = [bool];
+pub type CircuitStateBuf = Vec<bool>;
+pub type CircuitState = [bool];
 
 pub struct CircuitImage {
     colors: ImageBuffer<Rgb<u8>, Vec<u8>>,
