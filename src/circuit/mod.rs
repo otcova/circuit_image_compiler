@@ -18,6 +18,16 @@ pub enum GateType {
     Active,
 }
 
+impl GateType {
+    /// Returns weather it connects (or not) the wires if all controls are set (if toggled).
+    pub fn connects_wires(self, toggled: bool) -> bool {
+        match self {
+            GateType::Passive => toggled,
+            GateType::Active => !toggled,
+        }
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Pixel {
     Insulator,
@@ -74,22 +84,31 @@ impl Gate {
     }
 }
 
+#[derive(Clone)]
 pub struct CircuitImage {
+    /// The circuit rgb image.
     colors: ImageBuffer<Rgb<u8>, Vec<u8>>,
-    nets: Vec<u32>,
+
+    /// The net of each pixel of the image.
+    image_nets: Vec<u32>,
+
+    /// Each net stores the index of all the gates connected to it.
+    wires: Vec<SmallVec<[u32; 4]>>,
+
+    /// Each element stores
+    /// - the type of gate
+    /// - the index of all the gates connected (that control the behaviour)
+    /// - all the wires connected to it.
     gates: Vec<Gate>,
 
     power_color: Rgb<u8>,
     active_gate_color: Rgb<u8>,
     passive_gate_color: Rgb<u8>,
-
-    /// Count of nets that are not a gate.
-    /// Meaning that it's the number of wires including the two permanent NET_OFF/NET_ON.
-    ///
-    /// # Invariant
-    /// There are allways at least 2 wires (the NET_OFF and NET_ON) even if not in use.
-    wire_count: u32,
 }
+//
+// impl From<&CircuitImage> for CircuitImage {
+//
+// }
 
 pub fn hsv_value(pixel: Rgb<u8>) -> f32 {
     let (r, g, b) = (pixel[0], pixel[1], pixel[2]);
@@ -161,7 +180,7 @@ impl CircuitImage {
 
     pub fn set_net(&mut self, x: u32, y: u32, net: u32) {
         let index = x as usize + y as usize * self.width() as usize;
-        self.nets[index] = net;
+        self.image_nets[index] = net;
     }
 
     pub fn colors(&self) -> &ImageBuffer<Rgb<u8>, Vec<u8>> {
@@ -169,7 +188,7 @@ impl CircuitImage {
     }
 
     pub fn nets(&self) -> &[u32] {
-        &self.nets
+        &self.image_nets
     }
 
     pub fn width(&self) -> u32 {
@@ -182,7 +201,7 @@ impl CircuitImage {
 
     fn net_at(&self, x: u32, y: u32) -> u32 {
         let index = x as usize + y as usize * self.width() as usize;
-        self.nets[index]
+        self.image_nets[index]
     }
 
     pub fn pixel(&self, x: u32, y: u32) -> Pixel {
@@ -196,12 +215,12 @@ impl CircuitImage {
         } else if self.active_gate_color == color {
             Pixel::Gate {
                 ty: GateType::Active,
-                net: self.nets[index],
+                net: self.image_nets[index],
             }
         } else if self.passive_gate_color == color {
             Pixel::Gate {
                 ty: GateType::Passive,
-                net: self.nets[index],
+                net: self.image_nets[index],
             }
         } else if self.power_color == color {
             Pixel::Power
@@ -209,7 +228,7 @@ impl CircuitImage {
             let index = x as usize + y as usize * self.width() as usize;
             Pixel::Wire {
                 color,
-                net: self.nets[index],
+                net: self.image_nets[index],
             }
         }
     }
@@ -221,12 +240,14 @@ impl CircuitImage {
 
         let mut circuit = CircuitImage {
             colors,
-            nets: vec![NET_OFF; width as usize * height as usize],
-            gates: Vec::new(),
+            image_nets: vec![NET_OFF; width as usize * height as usize],
+
             power_color,
             active_gate_color,
             passive_gate_color,
-            wire_count: 0,
+
+            gates: Vec::new(),
+            wires: Vec::new(),
         };
 
         // Try Optimize: Check if this is relevant
@@ -236,7 +257,6 @@ impl CircuitImage {
 
         // A non-sparse map from net (u32) to Gate
         let mut gates = Vec::with_capacity(INIT_CAPACITY);
-        let mut gate_count: u32 = 0;
 
         let mut net_aliases = UnionFind::new(2); // OFF and ON nets
 
@@ -298,7 +318,6 @@ impl CircuitImage {
                     // empty slots with some placeholders.
                     gates.resize(current_net as usize, None);
                     gates.push(Some(Gate::new(ty)));
-                    gate_count += 1;
                 }
 
                 circuit.set_net(x, y, current_net);
@@ -705,6 +724,27 @@ impl CircuitImage {
             }
         }
 
+        // --- Remove unconnected wires and gates ---
+        let mut used_wires = vec![false; net_aliases.len() as usize];
+        for gate in gates.iter().flatten() {
+            for &net in &gate.wires {
+                used_wires[net_aliases.root(net) as usize] = true;
+            }
+        }
+
+        let mut gate_count: u32 = 0;
+        for net in 1..net_aliases.len() {
+            if let Some(gate) = gates.get_mut(net as usize).and_then(|g| g.as_ref()) {
+                if gate.controls.is_empty() && gate.wires.is_empty() {
+                    gates[net as usize] = None;
+                } else {
+                    gate_count += 1;
+                }
+            } else if !used_wires[net_aliases.root(net) as usize] {
+                net_aliases.alias(net, NET_OFF);
+            }
+        }
+
         // --- Apply net aliases ---
         circuit.gates = Vec::with_capacity(gate_count as usize);
         let (rename_map, net_count) = {
@@ -729,20 +769,28 @@ impl CircuitImage {
             (net_aliases, net_count)
         };
 
-        for net in &mut circuit.nets {
+        // Map image nets
+        for net in &mut circuit.image_nets {
             *net = rename_map[*net as usize];
         }
 
-        for gate in &mut circuit.gates {
+        // Map gate nets & update nets_gates connections
+        let wire_count = net_count - gate_count;
+        circuit.wires = vec![SmallVec::new(); wire_count as usize];
+
+        for (gate_index, gate) in &mut circuit.gates.iter_mut().enumerate() {
             for net in &mut gate.controls {
                 *net = rename_map[*net as usize];
             }
             for net in &mut gate.wires {
                 *net = rename_map[*net as usize];
+
+                if !circuit.wires[*net as usize].contains(&(gate_index as u32)) {
+                    circuit.wires[*net as usize].push(gate_index as u32);
+                }
             }
         }
 
-        circuit.wire_count = net_count - gate_count;
         circuit
     }
 
@@ -750,24 +798,37 @@ impl CircuitImage {
         self.gates.len() as u32
     }
 
+    /// Count of nets that are not a gate.
+    /// Meaning that it's the number of wires including the two permanent NET_OFF/NET_ON.
+    ///
+    /// There are allways at least 2 wires (the NET_OFF and NET_ON) even if not in use.
     pub fn wire_count(&self) -> u32 {
-        self.wire_count
+        self.wires.len() as u32
     }
 
     pub fn net_count(&self) -> u32 {
-        self.wire_count + self.gate_count()
+        self.wire_count() + self.gate_count()
     }
 
     pub fn get_gate(&self, net: u32) -> Option<&Gate> {
-        if self.wire_count <= net {
-            self.gates.get((net - self.wire_count) as usize)
+        if self.wire_count() <= net {
+            self.gates.get((net - self.wire_count()) as usize)
         } else {
             None
         }
     }
+
+    /// Returns an iterator of all the gates connected by the specified wire net.
+    pub fn connected_gates(&self, wire_net: u32) -> impl Iterator<Item = u32> {
+        self.wires
+            .get(wire_net as usize)
+            .into_iter()
+            .flatten()
+            .map(|&gates_idx| self.wire_count() + gates_idx)
+    }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct UnionFind {
     // Invariant: parents[i] <= i
     // Invariant: len <= u32::MAX + 1

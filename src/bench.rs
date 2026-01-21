@@ -25,7 +25,7 @@ where
     }
 
     // --- Discard first iterations ---
-    const WARMUP_ITERATIONS: usize = 8;
+    const WARMUP_ITERATIONS: usize = 4;
     const MAX_WARMUP_RATIO: usize = 8; // max of 1 warmup per every 8 samples
 
     let warmup = WARMUP_ITERATIONS.min(samples.len() / MAX_WARMUP_RATIO);

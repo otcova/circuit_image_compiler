@@ -1,70 +1,95 @@
-use std::ops::{Deref, DerefMut};
+use crate::bench::bench_seconds;
 
 use super::*;
+use std::{
+    ops::{Deref, DerefMut},
+    time::Duration,
+};
 
+/// Responisble of executing a circuit.
 pub trait CircuitRuntime {
-    type State: CircuitState;
+    fn name(&self) -> &'static str;
 
-    fn step(&mut self, circuit: &<Self::State as CircuitState>::Circuit, state: &mut Self::State);
+    /// Crates a new runtime with the configuration of this one for the given circuit.
+    fn new_dyn(&self, circuit: &CircuitImage) -> Box<dyn CircuitRuntime>;
 
-    #[allow(dead_code)]
-    /// Runtimes may apply optimizations that allow for jumping multiple steps at once.
-    fn step_n(
-        &mut self,
-        circuit: &<Self::State as CircuitState>::Circuit,
-        state: &mut Self::State,
-        n: u64,
-    ) {
+    /// Use step_n for faster iteration
+    fn step(&mut self, circuit: &CircuitImage, state: &mut CircuitStateNets);
+
+    /// This is faster than step_n (if n > 1) since runtimes may:
+    /// - Apply optimizations that allow for jumping multiple steps at once.
+    /// - Need to transform the state into
+    fn step_n(&mut self, circuit: &CircuitImage, state: &mut CircuitStateNets, n: u64) {
         for _ in 0..n {
             self.step(circuit, state);
         }
     }
+
+    /// Runs a steps for the amount of time specified.
+    /// Returns the steps/second.
+    fn bench(&mut self, circuit: &CircuitImage, time: Duration) -> f32 {
+        let step_by_n: u64 = 32;
+        let state = &mut CircuitStateNets::new(circuit);
+        step_by_n as f32 / bench_seconds(|| self.step_n(circuit, state, step_by_n), time)
+    }
 }
 
-pub trait CircuitState {
-    type Circuit;
-    fn new(circuit: &Self::Circuit) -> Self;
-    fn reset(&mut self);
-}
+pub struct CircuitStateNets(pub Box<[bool]>);
 
-pub struct CircuitImageState(pub Box<[bool]>);
-impl Deref for CircuitImageState {
+impl Deref for CircuitStateNets {
     type Target = [bool];
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
-impl DerefMut for CircuitImageState {
+impl DerefMut for CircuitStateNets {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
-impl CircuitState for CircuitImageState {
-    type Circuit = CircuitImage;
-    fn new(circuit: &CircuitImage) -> Self {
+
+impl CircuitStateNets {
+    pub fn new(circuit: &CircuitImage) -> Self {
         Self(vec![false; circuit.net_count() as usize].into_boxed_slice())
     }
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.fill(false);
     }
 }
 
-#[derive(Default)]
-pub struct CircuitInterpreterUF {
-    wire_connections: UnionFind,
-}
-
-impl CircuitRuntime for CircuitInterpreterUF {
-    type State = CircuitImageState;
-
-    /// Perfoms a single step. Equivalent to `update_wires()` + `update_gates()`
-    fn step(&mut self, circuit: &CircuitImage, net_state: &mut CircuitImageState) {
-        self.update_wires(circuit, net_state);
-        self.update_gates(circuit, net_state);
+impl CircuitStateNets {
+    /// Given the state of the wires, compute the state of the gates.
+    pub fn update_gates(&mut self, circuit: &CircuitImage) {
+        debug_assert!(circuit.net_count() as usize == self.len());
+        for (gate_i, gate) in circuit.gates.iter().enumerate() {
+            let gate_net = gate_i + circuit.wire_count() as usize;
+            self[gate_net] = gate.wires.iter().any(|&net| self[net as usize]);
+        }
     }
 }
 
-impl CircuitInterpreterUF {
+#[derive(Default)]
+pub struct CircuitRuntimeUnionFind {
+    wire_connections: UnionFind,
+}
+
+impl CircuitRuntime for CircuitRuntimeUnionFind {
+    fn name(&self) -> &'static str {
+        "UnionFind"
+    }
+
+    fn new_dyn(&self, _: &CircuitImage) -> Box<dyn CircuitRuntime> {
+        Box::new(Self::default())
+    }
+
+    /// Perfoms a single step. Equivalent to `update_wires()` + `update_gates()`
+    fn step(&mut self, circuit: &CircuitImage, net_state: &mut CircuitStateNets) {
+        self.update_wires(circuit, net_state);
+        net_state.update_gates(circuit);
+    }
+}
+
+impl CircuitRuntimeUnionFind {
     /// Given the state of the gates, compute the state of the wires.
     pub fn update_wires(&mut self, circuit: &CircuitImage, net_state: &mut [bool]) {
         debug_assert!(circuit.net_count() as usize == net_state.len());
@@ -76,13 +101,10 @@ impl CircuitInterpreterUF {
         // Connect nets from gates
         for gate in &circuit.gates {
             let toggled = gate.controls.iter().all(|&net| net_state[net as usize]);
-            match (gate.ty, toggled) {
-                (GateType::Active, false) | (GateType::Passive, true) => {
-                    for net in gate.wires.windows(2) {
-                        self.wire_connections.alias(net[0], net[1]);
-                    }
+            if gate.ty.connects_wires(toggled) {
+                for net in gate.wires.windows(2) {
+                    self.wire_connections.alias(net[0], net[1]);
                 }
-                _ => {}
             }
         }
 
@@ -91,14 +113,87 @@ impl CircuitInterpreterUF {
             net_state[wire_net as usize] = self.wire_connections.root(wire_net) == NET_ON;
         }
     }
+}
 
-    /// Given the state of the wires, compute the state of the gates.
-    pub fn update_gates(&mut self, circuit: &CircuitImage, net_state: &mut [bool]) {
+#[derive(Default)]
+pub struct CircuitRuntimeDfs {
+    dfs_stack: Vec<u32>,
+
+    /// Weather a certain gate is or not connection its wires.
+    connection_state: Vec<bool>,
+}
+
+impl CircuitRuntime for CircuitRuntimeDfs {
+    fn name(&self) -> &'static str {
+        "DFS"
+    }
+
+    fn new_dyn(&self, _: &CircuitImage) -> Box<dyn CircuitRuntime> {
+        Box::new(Self::default())
+    }
+
+    /// Perfoms a single step. Equivalent to `update_wires()` + `update_gates()`
+    fn step(&mut self, circuit: &CircuitImage, net_state: &mut CircuitStateNets) {
+        self.update_wires(circuit, net_state);
+        net_state.update_gates(circuit);
+    }
+}
+
+impl CircuitRuntimeDfs {
+    /// Given the state of the gates, compute the state of the wires.
+    pub fn update_wires(&mut self, circuit: &CircuitImage, net_state: &mut [bool]) {
         debug_assert!(circuit.net_count() as usize == net_state.len());
-        for (gate_i, gate) in circuit.gates.iter().enumerate() {
-            let gate_net = gate_i + circuit.wire_count() as usize;
-            net_state[gate_net] = gate.wires.iter().any(|&net| net_state[net as usize]);
+
+        self.connection_state.clear();
+        for gate in &circuit.gates {
+            let toggled = gate.controls.iter().all(|&net| net_state[net as usize]);
+            self.connection_state.push(gate.ty.connects_wires(toggled));
         }
+
+        // Used as visited map
+        net_state[..circuit.wire_count() as usize].fill(false);
+
+        self.dfs_stack.clear();
+        self.dfs_stack.push(NET_ON);
+        net_state[NET_ON as usize] = true;
+
+        // For all queued nodes (wires)
+        while let Some(wire) = self.dfs_stack.pop() {
+            // Visit all edges (gates)
+            for &gate_idx in &circuit.wires[wire as usize] {
+                // If edge is enabled (gate connects wires)
+                if self.connection_state[gate_idx as usize] {
+                    // Visit the neighbours
+                    for &neighbour in &circuit.gates[gate_idx as usize].wires {
+                        if !net_state[neighbour as usize] {
+                            self.dfs_stack.push(neighbour);
+                            net_state[neighbour as usize] = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // self.wire_connections.clear();
+        // self.wire_connections.extend(circuit.wire_count());
+        //
+        // // Connect nets from gates
+        // for gate in &circuit.gates {
+        //     let toggled = gate.controls.iter().all(|&net| net_state[net as usize]);
+        //     match (gate.ty, toggled) {
+        //         (GateType::Active, false) | (GateType::Passive, true) => {
+        //             for net in gate.wires.windows(2) {
+        //                 self.wire_connections.alias(net[0], net[1]);
+        //             }
+        //         }
+        //         _ => {}
+        //     }
+        // }
+        //
+        // // Write wire state
+        // for wire_net in 2..circuit.wire_count() {
+        //     net_state[wire_net as usize] = self.wire_connections.root(wire_net) == NET_ON;
+        // }
     }
 }
 

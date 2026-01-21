@@ -6,18 +6,19 @@ use eframe::{
     egui_glow,
     glow::{self, HasContext},
 };
-use image::ImageReader;
+use image::{ImageFormat, ImageReader};
 use native_dialog::DialogBuilder;
 use smallvec::SmallVec;
 use std::{
+    cell::Cell,
     collections::BTreeMap,
-    fmt, fs,
+    fmt::{self, Debug, Display},
+    fs,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
 
-use bench::*;
 use circuit::*;
 use circuit_canvas::*;
 
@@ -42,7 +43,7 @@ fn main() {
 
 struct MyEguiApp {
     circuit_canvas: CircuitCanvas,
-    circuit_runtime: Option<CircuitPlayground>,
+    circuit_playground: Option<CircuitPlayground>,
 
     cursor: Option<(u32, u32)>,
 
@@ -51,16 +52,23 @@ struct MyEguiApp {
     load_circuit_error_message: Option<String>,
 
     fallback_file_dialog: Option<egui_file_dialog::FileDialog>,
+
+    /// List of runtimes to try for each loaded circuit
+    runtimes: Vec<Box<dyn CircuitRuntime>>,
 }
 
 struct CircuitPlayground {
     name: String,
     path: PathBuf,
     circuit: CircuitImage,
-    circuit_state: CircuitImageState,
-    interpreter: CircuitInterpreterUF,
-    /// Seconds that the circuit needs to run a step
-    steps_per_second: f32,
+    circuit_state: CircuitStateNets,
+
+    /// Runtime chosen to use for the circuit.
+    runtime: Box<dyn CircuitRuntime>,
+
+    /// Multiple runtimes are tested and mesured.
+    /// The results hold the name and steps/second for each one of them.
+    benchmark_results: Vec<(&'static str, f32)>,
 }
 
 impl MyEguiApp {
@@ -81,13 +89,17 @@ impl MyEguiApp {
         });
 
         let mut app = Self {
-            circuit_runtime: None,
+            circuit_playground: None,
             current_folder,
             current_files: Vec::new(),
             circuit_canvas,
             cursor: None,
             load_circuit_error_message: None,
             fallback_file_dialog: None,
+            runtimes: vec![
+                Box::new(CircuitRuntimeUnionFind::default()),
+                Box::new(CircuitRuntimeDfs::default()),
+            ],
         };
 
         app.load_circuit(gl, &default_circuit);
@@ -166,9 +178,7 @@ impl MyEguiApp {
             .map(|e| e.path())
             .filter(|p| p.is_file())
         {
-            if let Some(ext) = path.extension()
-                && ext.to_string_lossy().to_lowercase() == "png"
-            {
+            if ImageFormat::from_path(&path).is_ok() {
                 let name = path
                     .file_stem()
                     .map(|s| s.to_string_lossy().into())
@@ -198,7 +208,7 @@ impl MyEguiApp {
     }
 
     fn load_circuit(&mut self, gl: &glow::Context, path: impl Into<PathBuf>) {
-        self.circuit_runtime = None;
+        self.circuit_playground = None;
         self.load_circuit_error_message = None;
 
         let path = path.into();
@@ -247,26 +257,35 @@ impl MyEguiApp {
         };
 
         let circuit = CircuitImage::new(img);
-        let mut interpreter = CircuitInterpreterUF::default();
-        let mut circuit_state = CircuitImageState::new(&circuit);
+        let mut circuit_state = CircuitStateNets::new(&circuit);
 
         self.circuit_canvas.load_circuit(gl, &circuit);
         self.circuit_canvas.load_circuit_state(gl, &circuit_state);
 
-        let steps_per_second = 1.
-            / bench_seconds(
-                || interpreter.step(&circuit, &mut circuit_state),
-                Duration::from_millis(100),
+        let time_per_runtime = Duration::from_millis(100);
+        let mut benchmark_results: Vec<_> = self
+            .runtimes
+            .iter_mut()
+            .map(|runtime| (runtime.name(), runtime.bench(&circuit, time_per_runtime)))
+            .collect();
+        let runtime = benchmark_results
+            .iter()
+            .enumerate()
+            .max_by(|(_, (_, a)), (_, (_, b))| a.total_cmp(b))
+            .map_or_else::<Box<dyn CircuitRuntime>, _, _>(
+                || Box::new(CircuitRuntimeUnionFind::default()),
+                |(idx, _)| self.runtimes[idx].new_dyn(&circuit),
             );
+        benchmark_results.sort_unstable_by(|(_, a), (_, b)| b.total_cmp(a));
 
         circuit_state.reset();
-        self.circuit_runtime = Some(CircuitPlayground {
+        self.circuit_playground = Some(CircuitPlayground {
             name,
             path,
             circuit,
             circuit_state,
-            interpreter,
-            steps_per_second,
+            runtime,
+            benchmark_results,
         });
     }
 
@@ -293,13 +312,13 @@ impl MyEguiApp {
 
             if self.current_files.len() > 1 {
                 let current_selection = self
-                    .circuit_runtime
+                    .circuit_playground
                     .as_ref()
                     .map(|r| r.name.clone())
                     .unwrap_or_else(|| "<Select Circuit>".into());
 
                 let mut new_selection = None;
-                egui::ComboBox::from_id_salt("png_combo")
+                egui::ComboBox::from_id_salt("LoadCircuit/combo")
                     .selected_text(current_selection)
                     .show_ui(ui, |ui| {
                         for (name, path) in &self.current_files {
@@ -326,26 +345,40 @@ impl MyEguiApp {
 
         self.show_circuit_picker(ui, gl);
 
-        let Some(runtime) = &self.circuit_runtime else {
+        let Some(playground) = &self.circuit_playground else {
             return;
         };
 
         ui.strong(format!(
             "size: {:?} x {:?}",
-            runtime.circuit.width(),
-            runtime.circuit.height()
+            playground.circuit.width(),
+            playground.circuit.height()
         ));
-        ui.strong(format!("wires: {:?}", runtime.circuit.wire_count() - 2));
-        ui.strong(format!("gates: {:?}", runtime.circuit.gate_count()));
-        ui.strong(format!("steps/s: {}", SiValue(runtime.steps_per_second)));
+        ui.strong(format!("wires: {:?}", playground.circuit.wire_count() - 2));
+        ui.strong(format!("gates: {:?}", playground.circuit.gate_count()));
+
+        if let Some(&(best_name, best_result)) = playground.benchmark_results.first() {
+            let best = format!("steps/s: {} ({})", SiValue(best_result), best_name);
+            if playground.benchmark_results.len() == 1 {
+                ui.strong(best);
+            } else {
+                CollapsingHeader::new(RichText::new(best).strong())
+                    .id_salt("Circuit/BenchmarkResults/CollapsingHeader")
+                    .show(ui, |ui| {
+                        for &(name, result) in playground.benchmark_results.iter().skip(1) {
+                            ui.strong(format!("steps/s: {} ({})", SiValue(result), name));
+                        }
+                    });
+            }
+        }
     }
 
     fn show_selected_net_info(&mut self, ui: &mut Ui) {
         let Some((x, y)) = self.cursor else { return };
-        let Some(runtime) = &self.circuit_runtime else {
+        let Some(playground) = &self.circuit_playground else {
             return;
         };
-        let Some(&color) = runtime.circuit.colors().get_pixel_checked(x, y) else {
+        let Some(&color) = playground.circuit.colors().get_pixel_checked(x, y) else {
             return;
         };
 
@@ -353,27 +386,30 @@ impl MyEguiApp {
         ui.heading("Net Info");
 
         CollapsingHeader::new(RichText::new(format!("pixel  x: {x}  y: {y}")).strong())
-            .id_salt("Net Info/pos")
+            .id_salt("Net Info/pos/CollapsingHeader")
             .show(ui, |ui| {
                 ui.strong(format!("rgb: {}, {}, {}", color[0], color[1], color[2]));
                 ui.strong(format!("saturation: {:.0}%", 100. * hsv_saturation(color)));
                 ui.strong(format!("value: {:.0}%", 100. * hsv_value(color)));
             });
 
-        let pixel = runtime.circuit.pixel(x, y);
+        let pixel = playground.circuit.pixel(x, y);
         if let Some(net) = pixel.net() {
             ui.strong(format!("net: {:?}", net));
 
-            if let Some(gate) = runtime.circuit.get_gate(net) {
+            if let Some(gate) = playground.circuit.get_gate(net) {
                 ui.strong(format!("gate type: {:?}", gate.ty));
                 ui.strong(format!("gate controls: {:?}", gate.controls));
                 ui.strong(format!("gate wires: {:?}", gate.wires));
+            } else {
+                let gates = playground.circuit.connected_gates(net);
+                ui.strong(format!("connected gates: {}", FmtIter::from(gates)));
             }
         }
     }
 
     fn show_execution_controls(&mut self, ctx: &egui::Context, ui: &mut Ui, gl: &glow::Context) {
-        let Some(runtime) = &self.circuit_runtime else {
+        let Some(playground) = &self.circuit_playground else {
             return;
         };
 
@@ -387,51 +423,51 @@ impl MyEguiApp {
 
         if ui.button("Restart ").clicked() || shortcut(ctx, Modifiers::NONE, Key::R) {
             let camera = self.circuit_canvas.camera;
-            let path = runtime.path.clone();
-            let previous_runtime = self.circuit_runtime.take();
+            let path = playground.path.clone();
+            let previous_playground = self.circuit_playground.take();
 
             self.load_circuit(gl, path);
             self.load_circuit_error_message = None;
 
             // Restore state
-            self.circuit_runtime = self.circuit_runtime.take().or(previous_runtime);
+            self.circuit_playground = self.circuit_playground.take().or(previous_playground);
             self.circuit_canvas.camera = camera;
 
-            // Get runtime mutably
-            let Some(runtime) = &mut self.circuit_runtime else {
+            // Get playground mutably
+            let Some(playground) = &mut self.circuit_playground else {
                 return;
             };
 
-            runtime.circuit_state = CircuitImageState::new(&runtime.circuit);
+            playground.circuit_state = CircuitStateNets::new(&playground.circuit);
             self.circuit_canvas
-                .load_circuit_state(gl, &runtime.circuit_state);
+                .load_circuit_state(gl, &playground.circuit_state);
         }
 
         if ui.button("Step ").clicked()
             || shortcut(ctx, Modifiers::NONE, Key::ArrowRight)
             || shortcut(ctx, Modifiers::NONE, Key::S)
         {
-            // Get runtime mutably
-            let Some(runtime) = &mut self.circuit_runtime else {
+            // Get playground mutably
+            let Some(playground) = &mut self.circuit_playground else {
                 return;
             };
 
-            runtime
-                .interpreter
-                .step(&runtime.circuit, &mut runtime.circuit_state);
+            playground
+                .runtime
+                .step(&playground.circuit, &mut playground.circuit_state);
             self.circuit_canvas
-                .load_circuit_state(gl, &runtime.circuit_state);
+                .load_circuit_state(gl, &playground.circuit_state);
         }
     }
 
     fn show_circuit(&mut self, ui: &mut Ui) {
-        let Some(runtime) = &self.circuit_runtime else {
+        let Some(playground) = &self.circuit_playground else {
             return;
         };
 
         // --- Allocate space for the circuit canvas ---
-        let width = runtime.circuit.width();
-        let height = runtime.circuit.height();
+        let width = playground.circuit.width();
+        let height = playground.circuit.height();
         let surface_size = ui.available_size();
         let (rect, response) = ui.allocate_exact_size(surface_size, Sense::drag());
 
@@ -483,7 +519,7 @@ impl MyEguiApp {
 
         self.circuit_canvas.selected_net = self
             .cursor
-            .and_then(|(x, y)| runtime.circuit.pixel(x, y).net())
+            .and_then(|(x, y)| playground.circuit.pixel(x, y).net())
             .unwrap_or(0);
 
         // --- Draw Circuit ---
@@ -522,5 +558,55 @@ impl fmt::Display for SiValue {
         let precision = (SIG_FIGS - int_digits).max(0) as usize;
 
         write!(f, "{:.*}{}", precision, scaled, suffix)
+    }
+}
+
+struct FmtIter<I: IntoIterator>(Cell<Option<I>>);
+
+impl<I: IntoIterator> From<I> for FmtIter<I> {
+    fn from(value: I) -> Self {
+        FmtIter(Cell::new(Some(value)))
+    }
+}
+
+impl<I: IntoIterator> Display for FmtIter<I>
+where
+    <I as IntoIterator>::Item: Display,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Some(it) = self.0.replace(None) else {
+            return write!(f, "[<consumed>]");
+        };
+        let mut it = it.into_iter();
+        write!(f, "[")?;
+        if let Some(first) = it.next() {
+            write!(f, "{}", first)?;
+            for x in it {
+                write!(f, ", {}", x)?;
+            }
+        }
+        write!(f, "]")?;
+        Ok(())
+    }
+}
+
+impl<I: IntoIterator> Debug for FmtIter<I>
+where
+    <I as IntoIterator>::Item: Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Some(it) = self.0.replace(None) else {
+            return write!(f, "[<consumed>]");
+        };
+        let mut it = it.into_iter();
+        write!(f, "[")?;
+        if let Some(first) = it.next() {
+            write!(f, "{:?}", first)?;
+            for x in it {
+                write!(f, ", {:?}", x)?;
+            }
+        }
+        write!(f, "]")?;
+        Ok(())
     }
 }
