@@ -42,7 +42,7 @@ fn main() {
 
 struct MyEguiApp {
     circuit_canvas: CircuitCanvas,
-    circuit_runtime: Option<CircuitRuntime>,
+    circuit_runtime: Option<CircuitPlayground>,
 
     cursor: Option<(u32, u32)>,
 
@@ -53,14 +53,14 @@ struct MyEguiApp {
     fallback_file_dialog: Option<egui_file_dialog::FileDialog>,
 }
 
-struct CircuitRuntime {
+struct CircuitPlayground {
     name: String,
     path: PathBuf,
-    circuit: Circuit,
-    circuit_state: Vec<bool>,
-    interpreter: UnoptimizedCircuitInterpreter,
+    circuit: CircuitImage,
+    circuit_state: CircuitImageState,
+    interpreter: CircuitInterpreterUF,
     /// Seconds that the circuit needs to run a step
-    step_time: Duration,
+    steps_per_second: f32,
 }
 
 impl MyEguiApp {
@@ -246,28 +246,27 @@ impl MyEguiApp {
             let _ = self.open_folder(folder);
         };
 
-        let circuit = Circuit::new(img);
-        let mut interpreter = UnoptimizedCircuitInterpreter::default();
-
-        let mut circuit_state = CircuitStateBuf::new();
-        circuit.initial_state(&mut circuit_state);
+        let circuit = CircuitImage::new(img);
+        let mut interpreter = CircuitInterpreterUF::default();
+        let mut circuit_state = CircuitImageState::new(&circuit);
 
         self.circuit_canvas.load_circuit(gl, &circuit);
         self.circuit_canvas.load_circuit_state(gl, &circuit_state);
 
-        let step_time = bench_time(
-            || interpreter.step(&circuit, &mut circuit_state),
-            Duration::from_millis(100),
-        );
-        circuit.initial_state(&mut circuit_state);
+        let steps_per_second = 1.
+            / bench_seconds(
+                || interpreter.step(&circuit, &mut circuit_state),
+                Duration::from_millis(100),
+            );
 
-        self.circuit_runtime = Some(CircuitRuntime {
+        circuit_state.reset();
+        self.circuit_runtime = Some(CircuitPlayground {
             name,
             path,
             circuit,
             circuit_state,
             interpreter,
-            step_time,
+            steps_per_second,
         });
     }
 
@@ -333,14 +332,12 @@ impl MyEguiApp {
 
         ui.strong(format!(
             "size: {:?} x {:?}",
-            runtime.circuit.image.width(),
-            runtime.circuit.image.height()
+            runtime.circuit.width(),
+            runtime.circuit.height()
         ));
         ui.strong(format!("wires: {:?}", runtime.circuit.wire_count() - 2));
         ui.strong(format!("gates: {:?}", runtime.circuit.gate_count()));
-
-        let rate = 1. / runtime.step_time.as_secs_f32();
-        ui.strong(format!("steps/s: {}", SiValue(rate)));
+        ui.strong(format!("steps/s: {}", SiValue(runtime.steps_per_second)));
     }
 
     fn show_selected_net_info(&mut self, ui: &mut Ui) {
@@ -348,7 +345,7 @@ impl MyEguiApp {
         let Some(runtime) = &self.circuit_runtime else {
             return;
         };
-        let Some(&color) = runtime.circuit.image.colors().get_pixel_checked(x, y) else {
+        let Some(&color) = runtime.circuit.colors().get_pixel_checked(x, y) else {
             return;
         };
 
@@ -363,7 +360,7 @@ impl MyEguiApp {
                 ui.strong(format!("value: {:.0}%", 100. * hsv_value(color)));
             });
 
-        let pixel = runtime.circuit.image.pixel(x, y);
+        let pixel = runtime.circuit.pixel(x, y);
         if let Some(net) = pixel.net() {
             ui.strong(format!("net: {:?}", net));
 
@@ -405,7 +402,7 @@ impl MyEguiApp {
                 return;
             };
 
-            runtime.circuit.initial_state(&mut runtime.circuit_state);
+            runtime.circuit_state = CircuitImageState::new(&runtime.circuit);
             self.circuit_canvas
                 .load_circuit_state(gl, &runtime.circuit_state);
         }
@@ -433,8 +430,8 @@ impl MyEguiApp {
         };
 
         // --- Allocate space for the circuit canvas ---
-        let width = runtime.circuit.image.width();
-        let height = runtime.circuit.image.height();
+        let width = runtime.circuit.width();
+        let height = runtime.circuit.height();
         let surface_size = ui.available_size();
         let (rect, response) = ui.allocate_exact_size(surface_size, Sense::drag());
 
@@ -486,7 +483,7 @@ impl MyEguiApp {
 
         self.circuit_canvas.selected_net = self
             .cursor
-            .and_then(|(x, y)| runtime.circuit.image.pixel(x, y).net())
+            .and_then(|(x, y)| runtime.circuit.pixel(x, y).net())
             .unwrap_or(0);
 
         // --- Draw Circuit ---

@@ -74,9 +74,14 @@ impl Gate {
     }
 }
 
-pub struct Circuit {
-    pub image: CircuitImage,
+pub struct CircuitImage {
+    colors: ImageBuffer<Rgb<u8>, Vec<u8>>,
+    nets: Vec<u32>,
     gates: Vec<Gate>,
+
+    power_color: Rgb<u8>,
+    active_gate_color: Rgb<u8>,
+    passive_gate_color: Rgb<u8>,
 
     /// Count of nets that are not a gate.
     /// Meaning that it's the number of wires including the two permanent NET_OFF/NET_ON.
@@ -86,16 +91,23 @@ pub struct Circuit {
     wire_count: u32,
 }
 
-pub type CircuitStateBuf = Vec<bool>;
-pub type CircuitState = [bool];
+pub fn hsv_value(pixel: Rgb<u8>) -> f32 {
+    let (r, g, b) = (pixel[0], pixel[1], pixel[2]);
+    r.max(g).max(b) as f32 / 255.0
+}
 
-pub struct CircuitImage {
-    colors: ImageBuffer<Rgb<u8>, Vec<u8>>,
-    nets: Vec<u32>,
+pub fn hsv_saturation(pixel: Rgb<u8>) -> f32 {
+    let (r, g, b) = (pixel[0], pixel[1], pixel[2]);
 
-    power_color: Rgb<u8>,
-    active_gate_color: Rgb<u8>,
-    passive_gate_color: Rgb<u8>,
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+
+    if max == 0 {
+        0.0
+    } else {
+        delta as f32 / max as f32
+    }
 }
 
 impl CircuitImage {
@@ -110,8 +122,10 @@ impl CircuitImage {
         (r - g.max(b), g - r.max(b), b - r.max(g))
     }
 
-    /// Initializes a new circuit image with all pixels set to NET_OFF.
-    pub fn new(colors: ImageBuffer<Rgb<u8>, Vec<u8>>) -> CircuitImage {
+    /// Given a set of colors, it choses the ones that represent (power, active gate, passive gate)
+    fn choose_matching_colors(
+        colors: impl Iterator<Item = Rgb<u8>>,
+    ) -> (Rgb<u8>, Rgb<u8>, Rgb<u8>) {
         // Initialize with lowerbound color match score.
         let mut power_max_score = 0;
         let mut active_gate_max_score = 0;
@@ -123,7 +137,7 @@ impl CircuitImage {
         let mut passive_gate_color = Rgb([0, 0, 255]);
 
         // Scan image to find power & gate colors
-        for &pixel in colors.pixels() {
+        for pixel in colors {
             let (power, active, passive) = Self::color_match_score(pixel);
 
             if power >= active && power >= passive {
@@ -142,13 +156,7 @@ impl CircuitImage {
             }
         }
 
-        CircuitImage {
-            nets: vec![NET_OFF; colors.width() as usize * colors.height() as usize],
-            colors,
-            power_color,
-            active_gate_color,
-            passive_gate_color,
-        }
+        (power_color, active_gate_color, passive_gate_color)
     }
 
     pub fn set_net(&mut self, x: u32, y: u32, net: u32) {
@@ -205,35 +213,26 @@ impl CircuitImage {
             }
         }
     }
-}
 
-pub fn hsv_value(pixel: Rgb<u8>) -> f32 {
-    let (r, g, b) = (pixel[0], pixel[1], pixel[2]);
-    r.max(g).max(b) as f32 / 255.0
-}
+    pub fn new(colors: ImageBuffer<Rgb<u8>, Vec<u8>>) -> Self {
+        let (power_color, active_gate_color, passive_gate_color) =
+            CircuitImage::choose_matching_colors(colors.pixels().copied());
+        let (width, height) = (colors.width(), colors.height());
 
-pub fn hsv_saturation(pixel: Rgb<u8>) -> f32 {
-    let (r, g, b) = (pixel[0], pixel[1], pixel[2]);
+        let mut circuit = CircuitImage {
+            colors,
+            nets: vec![NET_OFF; width as usize * height as usize],
+            gates: Vec::new(),
+            power_color,
+            active_gate_color,
+            passive_gate_color,
+            wire_count: 0,
+        };
 
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let delta = max - min;
-
-    if max == 0 {
-        0.0
-    } else {
-        delta as f32 / max as f32
-    }
-}
-
-impl Circuit {
-    pub fn new(colors: ImageBuffer<Rgb<u8>, Vec<u8>>) -> Circuit {
         // Try Optimize: Check if this is relevant
         const INIT_CAPACITY: usize = 64;
 
-        let mut image = CircuitImage::new(colors);
         const NET_UNVISITED: u32 = NET_OFF;
-        let (width, height) = (image.width(), image.height());
 
         // A non-sparse map from net (u32) to Gate
         let mut gates = Vec::with_capacity(INIT_CAPACITY);
@@ -276,12 +275,12 @@ impl Circuit {
 
         for y in 0..height {
             for x in 0..width {
-                let current_pixel = image.pixel(x, y);
+                let current_pixel = circuit.pixel(x, y);
 
                 let current_net = match current_pixel {
                     Pixel::Insulator => continue,
                     Pixel::Power => {
-                        image.set_net(x, y, NET_ON);
+                        circuit.set_net(x, y, NET_ON);
                         continue;
                     }
                     Pixel::Gate { net, .. } => net,
@@ -302,12 +301,12 @@ impl Circuit {
                     gate_count += 1;
                 }
 
-                image.set_net(x, y, current_net);
+                circuit.set_net(x, y, current_net);
                 dfs_stack.push((x, y));
 
                 while let Some((x, y)) = dfs_stack.pop() {
                     for (nx, ny) in neighbours_4(x, y).into_iter().flatten() {
-                        let neighbour_pixel = image.pixel(nx, ny);
+                        let neighbour_pixel = circuit.pixel(nx, ny);
                         match neighbour_pixel {
                             Pixel::Insulator => continue,
                             Pixel::Power => {
@@ -393,7 +392,7 @@ impl Circuit {
                         }
 
                         // Neighbour is connected and not visited => check it recursively
-                        image.set_net(nx, ny, current_net);
+                        circuit.set_net(nx, ny, current_net);
                         dfs_stack.push((nx, ny));
                     }
                 }
@@ -422,7 +421,7 @@ impl Circuit {
 
         // Loop for each border connecting current net with bridge net
         for ((first_x, first_y), (first_nx, first_ny)) in bridge_start_coords {
-            let current_pixel = image.pixel(first_x, first_y);
+            let current_pixel = circuit.pixel(first_x, first_y);
             let Pixel::Wire {
                 color: current_color,
                 net: current_net,
@@ -431,7 +430,7 @@ impl Circuit {
                 continue;
             };
 
-            let bridge_pixel = image.pixel(first_nx, first_ny);
+            let bridge_pixel = circuit.pixel(first_nx, first_ny);
             let Pixel::Wire {
                 color: _bridge_color,
                 net: bridge_net,
@@ -461,7 +460,7 @@ impl Circuit {
                     return false;
                 }
 
-                let net = image.net_at(x, y);
+                let net = circuit.net_at(x, y);
 
                 if net != bridge_net {
                     // If it's surround pixel => Store it to check it later on
@@ -469,7 +468,7 @@ impl Circuit {
                         && neighbours_4(x, y)
                             .into_iter()
                             .flatten()
-                            .any(|(nx, ny)| image.net_at(nx, ny) == current_net)
+                            .any(|(nx, ny)| circuit.net_at(nx, ny) == current_net)
                     {
                         surround_start_pixels.push((x, y));
                     }
@@ -482,7 +481,7 @@ impl Circuit {
                 let (mut pixel_normal_x, mut pixel_normal_y) = (0_f32, 0_f32);
                 let mut count = 0.;
                 for (nx, ny) in neighbours_4(x, y).into_iter().flatten() {
-                    if image.net_at(nx, ny) == current_net {
+                    if circuit.net_at(nx, ny) == current_net {
                         pixel_normal_x += (x as i64 - nx as i64) as f32;
                         pixel_normal_y += (y as i64 - ny as i64) as f32;
                         count += 1.;
@@ -567,7 +566,7 @@ impl Circuit {
                 }
                 surround_visited.insert((x, y));
 
-                let surround_net = image.net_at(x, y);
+                let surround_net = circuit.net_at(x, y);
 
                 let (mut surround_normal_x, mut surround_normal_y) = (0., 0.);
 
@@ -577,7 +576,7 @@ impl Circuit {
                     // - == parent net
                     // - touches current_net (4way)
 
-                    if image.net_at(x, y) != surround_net {
+                    if circuit.net_at(x, y) != surround_net {
                         return false;
                     }
 
@@ -586,7 +585,7 @@ impl Circuit {
 
                     // Check touches current_net & compute slop with it
                     for (nx, ny) in neighbours_4(x, y).into_iter().flatten() {
-                        if image.net_at(nx, ny) == current_net {
+                        if circuit.net_at(nx, ny) == current_net {
                             pixel_normal_x += (x as i64 - nx as i64) as f32;
                             pixel_normal_y += (y as i64 - ny as i64) as f32;
                             count += 1.;
@@ -671,7 +670,7 @@ impl Circuit {
                     let mut ray_ended = false;
 
                     let mut ray_hit = |x: u32, y: u32| {
-                        let Pixel::Wire { color, net } = image.pixel(x, y) else {
+                        let Pixel::Wire { color, net } = circuit.pixel(x, y) else {
                             ray_ended = true;
                             return;
                         };
@@ -707,7 +706,7 @@ impl Circuit {
         }
 
         // --- Apply net aliases ---
-        let mut dense_gates = Vec::with_capacity(gate_count as usize);
+        circuit.gates = Vec::with_capacity(gate_count as usize);
         let (rename_map, net_count) = {
             let (mut net_aliases, net_count) = net_aliases.into_compact_rename();
 
@@ -722,7 +721,7 @@ impl Circuit {
                     rename_map[gate_net as usize] = current;
                     *net_alias = gate_net;
                     gate_net += 1;
-                    dense_gates.push(gate);
+                    circuit.gates.push(gate);
                 } else {
                     *net_alias = current;
                 }
@@ -730,11 +729,11 @@ impl Circuit {
             (net_aliases, net_count)
         };
 
-        for net in &mut image.nets {
+        for net in &mut circuit.nets {
             *net = rename_map[*net as usize];
         }
 
-        for gate in &mut dense_gates {
+        for gate in &mut circuit.gates {
             for net in &mut gate.controls {
                 *net = rename_map[*net as usize];
             }
@@ -743,11 +742,8 @@ impl Circuit {
             }
         }
 
-        Circuit {
-            image,
-            gates: dense_gates,
-            wire_count: net_count - gate_count,
-        }
+        circuit.wire_count = net_count - gate_count;
+        circuit
     }
 
     pub fn gate_count(&self) -> u32 {
@@ -768,12 +764,6 @@ impl Circuit {
         } else {
             None
         }
-    }
-
-    /// Writes the on/off initial state of all the nets of the circuit.
-    pub fn initial_state(&self, state: &mut CircuitStateBuf) {
-        state.clear();
-        state.resize(self.net_count() as usize, false);
     }
 }
 

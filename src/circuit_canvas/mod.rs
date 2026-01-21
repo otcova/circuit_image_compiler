@@ -1,4 +1,3 @@
-use crate::circuit::Circuit;
 use eframe::{
     egui::{self, Vec2},
     egui_glow::check_for_gl_error,
@@ -6,6 +5,8 @@ use eframe::{
 };
 
 pub use camera::*;
+
+use crate::circuit::CircuitImage;
 
 mod camera;
 
@@ -35,7 +36,7 @@ impl CircuitCanvas {
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
 
             use glow::*;
-            gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_MIN_FILTER, NEAREST as i32);
+            gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_MIN_FILTER, LINEAR_MIPMAP_NEAREST as i32);
             gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_MAG_FILTER, NEAREST as i32);
 
             let background = [0., 0., 0., 255.];
@@ -101,8 +102,8 @@ impl CircuitCanvas {
         }
     }
 
-    pub fn load_circuit(&mut self, gl: &glow::Context, circuit: &Circuit) {
-        self.tex_size = Vec2::new(circuit.image.width() as f32, circuit.image.height() as f32);
+    pub fn load_circuit(&mut self, gl: &glow::Context, circuit: &CircuitImage) {
+        self.tex_size = Vec2::new(circuit.width() as f32, circuit.height() as f32);
         self.camera.position = self.tex_size / 2.;
         self.camera
             .set_surface_pixels_per_texel(500. / self.tex_size.y);
@@ -113,25 +114,26 @@ impl CircuitCanvas {
                 glow::TEXTURE_2D,
                 0,
                 glow::RGB as i32,
-                circuit.image.width() as i32,
-                circuit.image.height() as i32,
+                circuit.width() as i32,
+                circuit.height() as i32,
                 0,
                 glow::RGB,
                 glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(Some(circuit.image.colors().as_raw())),
+                glow::PixelUnpackData::Slice(Some(circuit.colors().as_raw())),
             );
+            gl.generate_mipmap(glow::TEXTURE_2D);
 
             gl.bind_texture(glow::TEXTURE_2D, Some(self.tex_nets));
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,
                 glow::R32UI as i32,
-                circuit.image.width() as i32,
-                circuit.image.height() as i32,
+                circuit.width() as i32,
+                circuit.height() as i32,
                 0,
                 glow::RED_INTEGER,
                 glow::UNSIGNED_INT,
-                glow::PixelUnpackData::Slice(Some(bytemuck::cast_slice(circuit.image.nets()))),
+                glow::PixelUnpackData::Slice(Some(bytemuck::cast_slice(circuit.nets()))),
             );
 
             gl.bind_buffer(glow::TEXTURE_BUFFER, Some(self.buffer_state));
