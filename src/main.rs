@@ -4,7 +4,7 @@ use eframe::{
         RichText, ScrollArea, Sense, Ui,
     },
     egui_glow,
-    glow::{self, HasContext},
+    glow::{self},
 };
 use image::{ImageFormat, ImageReader};
 use native_dialog::DialogBuilder;
@@ -53,8 +53,8 @@ struct MyEguiApp {
 
     fallback_file_dialog: Option<egui_file_dialog::FileDialog>,
 
-    /// List of runtimes to try for each loaded circuit
-    runtimes: Vec<Box<dyn CircuitRuntime>>,
+    /// List of engines to try for each loaded circuit
+    engines: Vec<Box<dyn CircuitEngine>>,
 }
 
 struct CircuitPlayground {
@@ -63,11 +63,12 @@ struct CircuitPlayground {
     circuit: CircuitImage,
     circuit_state: CircuitStateNets,
 
-    /// Runtime chosen to use for the circuit.
-    runtime: Box<dyn CircuitRuntime>,
+    /// Engine chosen to use for the circuit.
+    engine: Box<dyn CircuitEngine>,
 
-    /// Multiple runtimes are tested and mesured.
+    /// Multiple engines are tested and mesured.
     /// The results hold the name and steps/second for each one of them.
+    /// The first one are the results for the selected `self.engine`.
     benchmark_results: Vec<(&'static str, f32)>,
 }
 
@@ -96,9 +97,11 @@ impl MyEguiApp {
             cursor: None,
             load_circuit_error_message: None,
             fallback_file_dialog: None,
-            runtimes: vec![
-                Box::new(CircuitRuntimeUnionFind::default()),
-                Box::new(CircuitRuntimeDfs::default()),
+            engines: vec![
+                Box::new(CircuitEngineMadDfs::default()),
+                Box::new(CircuitEngineUf::default()),
+                Box::new(CircuitEngineUfT::default()),
+                Box::new(CircuitEngineDfs::default()),
             ],
         };
 
@@ -142,15 +145,8 @@ impl eframe::App for MyEguiApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new())
             .show(ctx, |ui| {
-                self.show_circuit(ui);
+                self.show_circuit(ui, gl);
             });
-
-        unsafe {
-            gl.bind_buffer(glow::TEXTURE_BUFFER, None);
-            gl.bind_texture(glow::TEXTURE_BUFFER, None);
-            gl.bind_texture(glow::TEXTURE_2D, None);
-            gl.use_program(None);
-        }
     }
 
     fn on_exit(&mut self, gl: Option<&glow::Context>) {
@@ -262,21 +258,23 @@ impl MyEguiApp {
         self.circuit_canvas.load_circuit(gl, &circuit);
         self.circuit_canvas.load_circuit_state(gl, &circuit_state);
 
-        let time_per_runtime = Duration::from_millis(100);
+        let time_per_engine = Duration::from_millis(100);
         let mut benchmark_results: Vec<_> = self
-            .runtimes
+            .engines
             .iter_mut()
-            .map(|runtime| (runtime.name(), runtime.bench(&circuit, time_per_runtime)))
+            .map(|engine| (engine.name(), engine.bench(&circuit, time_per_engine)))
             .collect();
-        let runtime = benchmark_results
-            .iter()
-            .enumerate()
-            .max_by(|(_, (_, a)), (_, (_, b))| a.total_cmp(b))
-            .map_or_else::<Box<dyn CircuitRuntime>, _, _>(
-                || Box::new(CircuitRuntimeUnionFind::default()),
-                |(idx, _)| self.runtimes[idx].new_dyn(&circuit),
-            );
+
         benchmark_results.sort_unstable_by(|(_, a), (_, b)| b.total_cmp(a));
+
+        let engine = self
+            .engines
+            .iter()
+            .find(|e| e.name() == benchmark_results[0].0)
+            .map_or_else::<Box<dyn CircuitEngine>, _, _>(
+                || Box::new(default_engine(&circuit)),
+                |e| e.new_dyn(&circuit),
+            );
 
         circuit_state.reset();
         self.circuit_playground = Some(CircuitPlayground {
@@ -284,7 +282,7 @@ impl MyEguiApp {
             path,
             circuit,
             circuit_state,
-            runtime,
+            engine,
             benchmark_results,
         });
     }
@@ -356,21 +354,29 @@ impl MyEguiApp {
         ));
         ui.strong(format!("wires: {:?}", playground.circuit.wire_count() - 2));
         ui.strong(format!("gates: {:?}", playground.circuit.gate_count()));
+    }
 
-        if let Some(&(best_name, best_result)) = playground.benchmark_results.first() {
-            let best = format!("steps/s: {} ({})", SiValue(best_result), best_name);
-            if playground.benchmark_results.len() == 1 {
-                ui.strong(best);
-            } else {
-                CollapsingHeader::new(RichText::new(best).strong())
-                    .id_salt("Circuit/BenchmarkResults/CollapsingHeader")
-                    .show(ui, |ui| {
-                        for &(name, result) in playground.benchmark_results.iter().skip(1) {
-                            ui.strong(format!("steps/s: {} ({})", SiValue(result), name));
-                        }
-                    });
-            }
-        }
+    fn choose_engine(&mut self, engine_name: &'static str) {
+        let Some(playground) = &mut self.circuit_playground else {
+            return;
+        };
+
+        let Some(engine) = self.engines.iter().find(|e| e.name() == engine_name) else {
+            return;
+        };
+        playground.engine = engine.new_dyn(&playground.circuit);
+
+        // Place selected engine result at top
+        let Some(bech_pos) = playground
+            .benchmark_results
+            .iter()
+            .position(|(n, _)| *n == engine_name)
+        else {
+            return;
+        };
+
+        playground.benchmark_results.swap(0, bech_pos);
+        playground.benchmark_results[1..].sort_by(|(_, a), (_, b)| b.total_cmp(a));
     }
 
     fn show_selected_net_info(&mut self, ui: &mut Ui) {
@@ -409,13 +415,44 @@ impl MyEguiApp {
     }
 
     fn show_execution_controls(&mut self, ctx: &egui::Context, ui: &mut Ui, gl: &glow::Context) {
-        let Some(playground) = &self.circuit_playground else {
+        if self.circuit_playground.is_none() {
             return;
-        };
+        }
 
         self.separator(ui);
 
         ui.heading("Execution");
+
+        let Some(playground) = &mut self.circuit_playground else {
+            return;
+        };
+
+        if let Some(&(best_name, best_result)) = playground.benchmark_results.first() {
+            let current = format!("Engine: {} at {} steps/s", best_name, SiValue(best_result));
+            if playground.benchmark_results.len() == 1 {
+                ui.strong(current);
+            } else {
+                let mut selected_engine = None;
+                CollapsingHeader::new(RichText::new(current).strong())
+                    .id_salt("Circuit/BenchmarkResults/CollapsingHeader")
+                    .show(ui, |ui| {
+                        for &(name, result) in playground.benchmark_results.iter().skip(1) {
+                            let resp =
+                                ui.strong(format!("{} at {} steps/s", name, SiValue(result)));
+                            if resp.clicked() {
+                                selected_engine = Some(name);
+                            }
+                        }
+                    });
+                if let Some(engine_name) = selected_engine {
+                    self.choose_engine(engine_name);
+                }
+            }
+        }
+
+        let Some(playground) = &self.circuit_playground else {
+            return;
+        };
 
         let shortcut = |ctx: &egui::Context, modifiers: Modifiers, key: Key| {
             ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(modifiers, key)))
@@ -453,14 +490,14 @@ impl MyEguiApp {
             };
 
             playground
-                .runtime
+                .engine
                 .step(&playground.circuit, &mut playground.circuit_state);
             self.circuit_canvas
                 .load_circuit_state(gl, &playground.circuit_state);
         }
     }
 
-    fn show_circuit(&mut self, ui: &mut Ui) {
+    fn show_circuit(&mut self, ui: &mut Ui, gl: &glow::Context) {
         let Some(playground) = &self.circuit_playground else {
             return;
         };
@@ -493,7 +530,7 @@ impl MyEguiApp {
             }
         }
 
-        // --- Click/Drag Interaction ---
+        // --- Click & Drag Interaction ---
         if let Some(pointer_pos) = response.interact_pointer_pos() {
             if response.dragged_by(PointerButton::Primary) {
                 // Position inside the image rect (in points)
@@ -514,6 +551,28 @@ impl MyEguiApp {
             if response.dragged_by(PointerButton::Secondary) {
                 self.circuit_canvas.camera.position -=
                     response.drag_delta() * self.circuit_canvas.camera.texels_per_surface_pixel();
+            }
+        }
+
+        // --- Net Set/Unset ---
+        let Some(playground) = &mut self.circuit_playground else {
+            return;
+        };
+        if let Some((x, y)) = self.cursor
+            && let Pixel::Wire { net, .. } = playground.circuit.pixel(x, y)
+            && net != NET_OFF
+            && net != NET_ON
+        {
+            if ui.input(|i| i.key_down(Key::Num1)) {
+                playground.circuit_state[net as usize] = true;
+                playground.circuit_state.update_gates(&playground.circuit);
+                self.circuit_canvas
+                    .load_circuit_state(gl, &playground.circuit_state);
+            } else if ui.input(|i| i.key_down(Key::Num0)) {
+                playground.circuit_state[net as usize] = false;
+                playground.circuit_state.update_gates(&playground.circuit);
+                self.circuit_canvas
+                    .load_circuit_state(gl, &playground.circuit_state);
             }
         }
 

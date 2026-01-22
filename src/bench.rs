@@ -3,20 +3,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub fn bench_seconds<R, F>(mut f: F, min_time: Duration) -> f32
+pub fn bench_seconds<I, R, F>(input: &mut I, mut f: F, min_time: Duration) -> f32
 where
-    F: FnMut() -> R,
+    F: FnMut(&mut I) -> R,
 {
     let mut samples = Vec::new();
     let bench_start = Instant::now();
 
     let start = Instant::now();
-    black_box(f());
+    black_box(f(black_box(input)));
     samples.push(start.elapsed().as_secs_f64());
 
     while bench_start.elapsed() < min_time {
         let start = Instant::now();
-        black_box(f());
+        black_box(f(black_box(input)));
         samples.push(start.elapsed().as_secs_f64());
     }
 

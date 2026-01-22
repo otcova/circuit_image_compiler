@@ -13,22 +13,35 @@ native-dialog = "0.9" # Native file picker
 egui-file-dialog = "0.12" # Fallback file picker
 env_logger = "0.11" # Print debug info to terminal
 
-# Compiler Backends
-inkwell = { version = "0.8", features = ["llvm20-1"], optional = true }
-cranelift = { version = "0.127", optional = true }
-cranelift-module = { version = "0.127", optional = true }
-cranelift-jit = { version = "0.127", optional = true }
+# # Compiler Backends
+# inkwell = { version = "0.8", features = ["llvm20-1"], optional = true }
+# cranelift = { version = "0.127", optional = true }
+# cranelift-module = { version = "0.127", optional = true }
+# cranelift-jit = { version = "0.127", optional = true }
 
 [patch.crates-io]
 # Use features that are not published in crates-io.
 glow = { git = "https://github.com/grovesNL/glow", rev = "d645b97" }
 
-[features]
-default = ["cranelift"]
+# [features]
+# default = ["cranelift"]
+#
+# cranelift = ["dep:cranelift", "dep:cranelift-module", "dep:cranelift-jit"]
+# llvm_dyn = ["inkwell/llvm20-1-force-dynamic"]
+# llvm = ["inkwell/llvm20-1-force-static"]
 
-cranelift = ["dep:cranelift", "dep:cranelift-module", "dep:cranelift-jit"]
-llvm_dyn = ["inkwell/llvm20-1-force-dynamic"]
-llvm = ["inkwell/llvm20-1-force-static"]
+[profile.dev]
+opt-level = 1
+
+# Set the default for dev dependencies higher
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.release]
+lto = false
+
+# Enable more optimization with: cargo build --profile release-lto
+[profile.release-lto]
+inherits = "release"
+codegen-units = 4
 lto = true

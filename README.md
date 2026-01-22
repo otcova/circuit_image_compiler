@@ -3,7 +3,7 @@
 - Simplest & fastest way (without llvm circuit compiler):
 
 ```bash
-# Fast Build (<5s after first build)
+# Fast Build (<10s after first build)
 cargo build
 ```
 
@@ -13,7 +13,7 @@ cargo build
 # Download LLVM 20.1.x (newer version might also work)
 sudo apt install llvm-20
 
-# Fast Build (~5s after first build)
+# Fast Build (<20s after first build)
 # The executable will only work on computers with llvm dynamic libraries
 cargo build --features llvm_dyn
 ```
