@@ -1,9 +1,13 @@
 use image::{ImageBuffer, Rgb};
-use smallvec::{SmallVec, ToSmallVec};
-use std::collections::HashSet;
+use smallvec::SmallVec;
+use std::{collections::HashSet, sync::Arc};
 
+pub use circuit_runner::*;
 pub use engine::*;
 
+use crate::utils::union_find::UnionFind;
+
+mod circuit_runner;
 mod engine;
 
 // Permanent unconditional off
@@ -69,17 +73,17 @@ impl Pixel {
 pub struct Gate {
     pub ty: GateType,
     /// Gate-Gate contacts
-    pub controls: SmallVec<[u32; 4]>,
+    pub controls: SmallVec<u32, 4>,
     /// Gate-Wire contacts
-    pub wires: SmallVec<[u32; 4]>,
+    pub wires: SmallVec<u32, 4>,
 }
 
 #[derive(Clone, Debug)]
 pub struct GateConnections {
     /// Gate-Gate contacts
-    pub controls: SmallVec<[u32; 4]>,
+    pub controls: SmallVec<u32, 4>,
     /// Gate-Wire contacts
-    pub wires: SmallVec<[u32; 4]>,
+    pub wires: SmallVec<u32, 4>,
 }
 
 impl Gate {
@@ -100,8 +104,8 @@ pub struct CircuitImage {
     /// The net of each pixel of the image.
     image_nets: Vec<u32>,
 
-    /// Each net stores the index of all the self.gates connected to it.
-    wires: Vec<SmallVec<[u32; 4]>>,
+    /// Each wire stores the index of all the `self.gates` connected to it.
+    wires: Vec<SmallVec<u32, 4>>,
 
     /// All gates from the circuit in net order, each element stores
     /// - the type of gate
@@ -112,6 +116,9 @@ pub struct CircuitImage {
     /// The amount of gates that are a not or buffer gate.
     /// TODO: Also consider permanent on/off grates as trivial?.
     non_trivial_gates: Vec<Gate>,
+
+    /// Each wire stores the index of all the `self.non_trivial_gates` connected.
+    wires_non_trivial: Vec<SmallVec<u32, 4>>,
 
     /// All passive gates with NET_ON connected as a wire.
     /// This NET_ON is exclusded in the wires list of GateConnections.
@@ -146,6 +153,24 @@ pub fn hsv_saturation(pixel: Rgb<u8>) -> f32 {
 }
 
 impl CircuitImage {
+    pub fn empty() -> Self {
+        Self {
+            colors: ImageBuffer::from_pixel(0, 0, Rgb([0, 0, 0])),
+            image_nets: Vec::new(),
+
+            wires: Vec::new(),
+            gates: Vec::new(),
+            non_trivial_gates: Vec::new(),
+            wires_non_trivial: Vec::new(),
+            buffer_gates: Vec::new(),
+            not_gates: Vec::new(),
+
+            power_color: Rgb([255, 0, 0]),
+            active_gate_color: Rgb([0, 255, 0]),
+            passive_gate_color: Rgb([0, 0, 255]),
+        }
+    }
+
     // 20% value threshold for the colors that are considered insulators.
     // (Comparison is rounded down to 2 digits => add 0.5% to max)
     const INSULATOR_COLOR_MAX_VALUE: f32 = 0.205;
@@ -215,6 +240,10 @@ impl CircuitImage {
         self.colors.height()
     }
 
+    pub fn power_color(&self) -> Rgb<u8> {
+        self.power_color
+    }
+
     fn net_at(&self, x: u32, y: u32) -> u32 {
         let index = x as usize + y as usize * self.width() as usize;
         self.image_nets[index]
@@ -268,6 +297,7 @@ impl CircuitImage {
             buffer_gates: Vec::new(),
             not_gates: Vec::new(),
             non_trivial_gates: Vec::new(),
+            wires_non_trivial: Vec::new(),
         };
 
         // Try Optimize: Check if this is relevant
@@ -797,6 +827,8 @@ impl CircuitImage {
         // Map gate nets & update wires connections
         let wire_count = net_count - gate_count;
         circuit.wires = vec![SmallVec::new(); wire_count as usize];
+        circuit.wires_non_trivial = vec![SmallVec::new(); wire_count as usize];
+
         for (gate_index, gate) in &mut circuit.gates.iter_mut().enumerate() {
             for net in &mut gate.controls {
                 *net = rename_map[*net as usize];
@@ -822,9 +854,10 @@ impl CircuitImage {
             );
 
             if gate.wires[0] == NET_ON {
+                // Case gate is trivial
                 let trivial_gate = GateConnections {
                     controls: gate.controls.clone(),
-                    wires: gate.wires[1..].to_smallvec(),
+                    wires: gate.wires[1..].iter().copied().collect(),
                 };
 
                 match gate.ty {
@@ -832,7 +865,12 @@ impl CircuitImage {
                     GateType::Active => circuit.not_gates.push(trivial_gate),
                 }
             } else {
+                // Case gate is not trivial
+                let non_tivial_idx = circuit.non_trivial_gates.len() as u32;
                 circuit.non_trivial_gates.push(gate.clone());
+                for &wire in &gate.wires {
+                    circuit.wires_non_trivial[wire as usize].push(non_tivial_idx);
+                }
             }
         }
 
@@ -873,143 +911,35 @@ impl CircuitImage {
     }
 }
 
-#[derive(Default, Clone)]
-struct UnionFind {
-    // Invariant: parents[i] <= i
-    // Invariant: len <= u32::MAX + 1
-    parents: Vec<u32>,
+pub struct CircuitState {
+    pub circuit: Arc<CircuitImage>,
+    pub nets: CircuitStateNets,
+    pub tick: u64,
 }
 
-#[allow(dead_code)]
-impl UnionFind {
-    pub fn new(node_count: u32) -> UnionFind {
-        UnionFind {
-            parents: (0..node_count).collect(),
+impl CircuitState {
+    pub fn new(circuit: Arc<CircuitImage>) -> Self {
+        Self {
+            tick: 0,
+            nets: CircuitStateNets::new(&circuit),
+            circuit,
         }
     }
+}
 
-    /// Removes all nodes
-    pub fn clear(&mut self) {
-        self.parents.clear();
-    }
-
-    pub fn from_vec_unchecked(parents: Vec<u32>) -> UnionFind {
-        UnionFind { parents }
-    }
-
-    /// Crates n consecutive new nodes.
-    /// Returns first node created.
-    pub fn extend(&mut self, n: u32) -> u32 {
-        let first = self.parents.len() as u32;
-        self.parents.extend(first..first + n);
-        first
-    }
-
-    /// Sets the parent for the provided node without checking that:
-    /// `parent <= node`
-    pub fn set_parent_unchecked(&mut self, node: u32, parent: u32) {
-        self.parents[node as usize] = parent;
-    }
-
-    /// Finds the root and compresses the path to it by half
-    pub fn root_uncached(&self, mut i: u32) -> u32 {
-        while i != self.parents[i as usize] {
-            let parent = self.parents[i as usize];
-            i = self.parents[parent as usize];
-        }
-        i
-    }
-
-    /// Finds the root and compresses the path to it by half
-    pub fn root(&mut self, mut i: u32) -> u32 {
-        while i != self.parents[i as usize] {
-            let parent = self.parents[i as usize];
-            let grandparent = self.parents[parent as usize];
-
-            self.parents[i as usize] = grandparent;
-            i = grandparent;
-        }
-        i
-    }
-
-    /// Returns the amount of nodes independently of the aliases
-    pub fn len(&self) -> u32 {
-        self.parents.len() as u32
-    }
-
-    pub fn parent(&self, i: u32) -> u32 {
-        self.parents[i as usize]
-    }
-
-    /// Flattens the node using the grand parent
-    pub fn grand_parent(&mut self, node: u32) -> u32 {
-        let i = node as usize;
-        self.parents[i] = self.parents[self.parents[i] as usize];
-        self.parents[i]
-    }
-
-    /// Flattens the node checking if it's parent or grand_parent is the requested
-    pub fn has_grandparent(&mut self, node: u32, grand_parent: u32) -> bool {
-        let parent = self.parent(node);
-        if parent == grand_parent {
-            return true;
-        }
-        let found = self.parent(parent);
-        if found == grand_parent {
-            true
-        } else {
-            self.parents[node as usize] = found;
-            false
+impl Clone for CircuitState {
+    fn clone(&self) -> Self {
+        Self {
+            circuit: self.circuit.clone(),
+            nets: self.nets.clone(),
+            tick: self.tick,
         }
     }
-
-    /// Return the root of the resulting alias
-    pub fn alias(&mut self, a: u32, b: u32) -> u32 {
-        let root_a = self.root(a);
-        let root_b = self.root(b);
-
-        if root_a < root_b {
-            self.parents[root_b as usize] = root_a;
-            root_a
-        } else {
-            self.parents[root_a as usize] = root_b;
-            root_b
+    fn clone_from(&mut self, other: &Self) {
+        if !Arc::ptr_eq(&self.circuit, &other.circuit) {
+            self.circuit.clone_from(&other.circuit);
         }
-    }
-
-    /// Converts the UnionFind alias-datastructure into a dense rename map.
-    ///
-    /// - The parents of i (vec[i]) will point to what was the root of the node i (root(i)).
-    /// - All elements of the returned vec will be in 0..=(the amount of disctinct roots - 1)
-    ///   without any value missing.
-    ///
-    /// Returns (the Vec rename mapping, the amount of disctinct roots).
-    pub fn into_compact_rename(mut self) -> (Vec<u32>, u32) {
-        let mut root_count = 0;
-        for i in 0..self.parents.len() {
-            if self.parents[i] == i as u32 {
-                self.parents[i] = root_count;
-                root_count += 1;
-            } else {
-                self.parents[i] = self.parents[self.parents[i] as usize];
-            }
-        }
-        (self.parents, root_count)
-    }
-
-    /// Resove the backwards dependencies.
-    /// After this call, for all i: parent(i) == root(i)
-    pub fn flatten(&mut self) {
-        for i in 0..self.parents.len() {
-            self.grand_parent(i as u32);
-        }
-    }
-
-    /// Removes all aplied aliases.
-    /// Sets the root of every node to itselfs.
-    pub fn reset_aliases(&mut self) {
-        for i in 0..self.parents.len() {
-            self.parents[i] = i as u32;
-        }
+        self.nets.clone_from(&other.nets);
+        self.tick = other.tick;
     }
 }

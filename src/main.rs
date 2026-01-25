@@ -1,3 +1,4 @@
+use core::f32;
 use eframe::{
     egui::{
         self, CollapsingHeader, Key, KeyboardShortcut, Modifiers, PaintCallback, PointerButton,
@@ -15,16 +16,21 @@ use std::{
     fmt::{self, Debug, Display},
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, mpsc::TryRecvError},
     time::Duration,
 };
 
 use circuit::*;
 use circuit_canvas::*;
 
-mod bench;
+use crate::utils::{
+    num_display::{GroupedUInt, SiValue},
+    promise::Promise,
+};
+
 mod circuit;
 mod circuit_canvas;
+mod utils;
 
 fn main() {
     env_logger::init();
@@ -43,7 +49,7 @@ fn main() {
 
 struct MyEguiApp {
     circuit_canvas: CircuitCanvas,
-    circuit_playground: Option<CircuitPlayground>,
+    playground: Option<Playground>,
 
     cursor: Option<(u32, u32)>,
 
@@ -53,23 +59,23 @@ struct MyEguiApp {
 
     fallback_file_dialog: Option<egui_file_dialog::FileDialog>,
 
-    /// List of engines to try for each loaded circuit
-    engines: Vec<Box<dyn CircuitEngine>>,
+    rt: tokio::runtime::Runtime,
 }
 
-struct CircuitPlayground {
-    name: String,
+struct Playground {
+    circuit_name: String,
     path: PathBuf,
-    circuit: CircuitImage,
-    circuit_state: CircuitStateNets,
+    runner: Promise<CircuitRunner>,
+    state: Option<CircuitState>,
+    engine_name: Option<&'static str>,
 
-    /// Engine chosen to use for the circuit.
-    engine: Box<dyn CircuitEngine>,
+    /// ticks per second selected by the user
+    target_tps: f32,
 
     /// Multiple engines are tested and mesured.
-    /// The results hold the name and steps/second for each one of them.
-    /// The first one are the results for the selected `self.engine`.
-    benchmark_results: Vec<(&'static str, f32)>,
+    /// The results hold (the engine name, tps) sorted by tps (bigger first)
+    benchmark_results: Vec<EngineBenchmarkResult>,
+    benchmark_rx: Option<std::sync::mpsc::Receiver<EngineBenchmarkResult>>,
 }
 
 impl MyEguiApp {
@@ -90,22 +96,24 @@ impl MyEguiApp {
         });
 
         let mut app = Self {
-            circuit_playground: None,
+            playground: None,
+
             current_folder,
             current_files: Vec::new(),
-            circuit_canvas,
+
             cursor: None,
+            circuit_canvas,
             load_circuit_error_message: None,
+
             fallback_file_dialog: None,
-            engines: vec![
-                Box::new(CircuitEngineMadDfs::default()),
-                Box::new(CircuitEngineUf::default()),
-                Box::new(CircuitEngineUfT::default()),
-                Box::new(CircuitEngineDfs::default()),
-            ],
+
+            rt: tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .build()
+                .unwrap(),
         };
 
-        app.load_circuit(gl, &default_circuit);
+        app.load_circuit(&default_circuit);
         app.load_circuit_error_message = None;
 
         app
@@ -114,17 +122,40 @@ impl MyEguiApp {
 
 impl eframe::App for MyEguiApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        ctx.request_repaint();
         let gl = frame.gl().unwrap();
 
+        // Close App?
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
 
+        // File dialog update
         if let Some(file_dialog) = &mut self.fallback_file_dialog {
             file_dialog.update(ctx);
             if let Some(path) = file_dialog.take_picked() {
-                self.load_circuit(gl, &path);
+                self.load_circuit(&path);
+            }
+        }
+
+        if let Some(playground) = &mut self.playground
+            && let Some(runner) = playground.runner.get()
+        {
+            runner.get(|runtime| {
+                if let Some(state) = &mut playground.state {
+                    state.clone_from(&runtime.state);
+                } else {
+                    // Case new circuit
+                    // Since runtime starts paused, we do not need to quickly release the locked runner.
+                    playground.state = Some(runtime.state.clone());
+                    self.circuit_canvas.load_circuit(gl, &runtime.state.circuit);
+                }
+                playground.engine_name = Some(runtime.engine.name());
+            });
+
+            if let Some(state) = &playground.state {
+                self.circuit_canvas.load_circuit_state(gl, state);
             }
         }
 
@@ -136,8 +167,8 @@ impl eframe::App for MyEguiApp {
                 ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        self.show_circuit_info(ui, gl);
-                        self.show_execution_controls(ctx, ui, gl);
+                        self.show_circuit_info(ui);
+                        self.show_execution_controls(ctx, ui);
                         self.show_selected_net_info(ui);
                     });
             });
@@ -166,7 +197,7 @@ impl MyEguiApp {
 
         // To check file name collisions.
         // BTree to sort files alphabetically for better UX
-        let mut files = BTreeMap::<_, SmallVec<[_; 2]>>::new();
+        let mut files = BTreeMap::<_, SmallVec<_, 2>>::new();
         self.current_files.clear();
 
         for path in fs::read_dir(folder)?
@@ -203,8 +234,8 @@ impl MyEguiApp {
         Ok(())
     }
 
-    fn load_circuit(&mut self, gl: &glow::Context, path: impl Into<PathBuf>) {
-        self.circuit_playground = None;
+    fn load_circuit(&mut self, path: impl Into<PathBuf>) {
+        self.playground = None;
         self.load_circuit_error_message = None;
 
         let path = path.into();
@@ -220,7 +251,7 @@ impl MyEguiApp {
             return;
         }
 
-        let name = path
+        let circuit_name = path
             .file_stem()
             .map(|s| s.to_string_lossy().into())
             .unwrap_or_else(|| "circuit".into());
@@ -252,44 +283,42 @@ impl MyEguiApp {
             let _ = self.open_folder(folder);
         };
 
-        let circuit = CircuitImage::new(img);
-        let mut circuit_state = CircuitStateNets::new(&circuit);
+        let (runner, runner_done) = Promise::new();
+        let (benchmark_tx, benchmark_rx) = std::sync::mpsc::sync_channel(4);
 
-        self.circuit_canvas.load_circuit(gl, &circuit);
-        self.circuit_canvas.load_circuit_state(gl, &circuit_state);
-
-        let time_per_engine = Duration::from_millis(100);
-        let mut benchmark_results: Vec<_> = self
-            .engines
-            .iter_mut()
-            .map(|engine| (engine.name(), engine.bench(&circuit, time_per_engine)))
-            .collect();
-
-        benchmark_results.sort_unstable_by(|(_, a), (_, b)| b.total_cmp(a));
-
-        let engine = self
-            .engines
-            .iter()
-            .find(|e| e.name() == benchmark_results[0].0)
-            .map_or_else::<Box<dyn CircuitEngine>, _, _>(
-                || Box::new(default_engine(&circuit)),
-                |e| e.new_dyn(&circuit),
-            );
-
-        circuit_state.reset();
-        self.circuit_playground = Some(CircuitPlayground {
-            name,
+        self.playground = Some(Playground {
+            circuit_name,
             path,
-            circuit,
-            circuit_state,
-            engine,
-            benchmark_results,
+            runner,
+            state: None,
+            engine_name: None,
+
+            target_tps: f32::INFINITY,
+
+            benchmark_results: Vec::new(),
+            benchmark_rx: Some(benchmark_rx),
+        });
+
+        self.rt.spawn(async move {
+            let circuit = Arc::new(CircuitImage::new(img));
+            let engine = Box::new(default_engine(&circuit));
+            let mut state = CircuitState::new(circuit.clone());
+            let _ = runner_done.send(CircuitRunner::new(state.clone(), engine));
+
+            let mut engines = all_engines(&circuit);
+
+            let time_per_bench = Duration::from_millis(300);
+
+            for engine in &mut engines {
+                state.nets.reset();
+                let bench = engine.bench_tps(&mut state, time_per_bench);
+                let _ = benchmark_tx.send(bench);
+            }
         });
     }
 
-    fn show_circuit_picker(&mut self, ui: &mut Ui, gl: &glow::Context) {
+    fn show_circuit_picker(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            // TODO: Folder image
             if ui.button("Load File").clicked() {
                 // Open file picker (try native, if not fallback with egui)
                 if let Some(path) = match DialogBuilder::file().open_single_file().show() {
@@ -301,7 +330,7 @@ impl MyEguiApp {
                         None
                     }
                 } {
-                    self.load_circuit(gl, &path);
+                    self.load_circuit(&path);
 
                     self.current_folder = path;
                     self.current_folder.pop();
@@ -309,11 +338,20 @@ impl MyEguiApp {
             }
 
             if self.current_files.len() > 1 {
-                let current_selection = self
-                    .circuit_playground
-                    .as_ref()
-                    .map(|r| r.name.clone())
-                    .unwrap_or_else(|| "<Select Circuit>".into());
+                let current_selection = match &self.playground {
+                    None => "<Select Circuit>".into(),
+                    Some(Playground {
+                        circuit_name,
+                        runner,
+                        ..
+                    }) => {
+                        if runner.is_done() {
+                            circuit_name.clone()
+                        } else {
+                            format!("{circuit_name} (Loading)")
+                        }
+                    }
+                };
 
                 let mut new_selection = None;
                 egui::ComboBox::from_id_salt("LoadCircuit/combo")
@@ -325,7 +363,7 @@ impl MyEguiApp {
                     });
 
                 if let Some(path) = new_selection {
-                    self.load_circuit(gl, path.clone());
+                    self.load_circuit(path.clone());
                 }
             }
         });
@@ -338,53 +376,54 @@ impl MyEguiApp {
     }
 
     /// UI that shows the net and other info of the selected pixel
-    fn show_circuit_info(&mut self, ui: &mut Ui, gl: &glow::Context) {
+    fn show_circuit_info(&mut self, ui: &mut Ui) {
         ui.heading("Circuit");
 
-        self.show_circuit_picker(ui, gl);
+        self.show_circuit_picker(ui);
 
-        let Some(playground) = &self.circuit_playground else {
+        let Some(runner) = self.playground.as_mut().and_then(|p| p.runner.get()) else {
             return;
         };
 
         ui.strong(format!(
             "size: {:?} x {:?}",
-            playground.circuit.width(),
-            playground.circuit.height()
+            runner.circuit().width(),
+            runner.circuit().height()
         ));
-        ui.strong(format!("wires: {:?}", playground.circuit.wire_count() - 2));
-        ui.strong(format!("gates: {:?}", playground.circuit.gate_count()));
+        ui.strong(format!("wires: {:?}", runner.circuit().wire_count() - 2));
+        ui.strong(format!("gates: {:?}", runner.circuit().gate_count()));
     }
 
     fn choose_engine(&mut self, engine_name: &'static str) {
-        let Some(playground) = &mut self.circuit_playground else {
+        let Some(playground) = &mut self.playground else {
             return;
         };
-
-        let Some(engine) = self.engines.iter().find(|e| e.name() == engine_name) else {
+        let Some(state) = &playground.state else {
             return;
         };
-        playground.engine = engine.new_dyn(&playground.circuit);
-
-        // Place selected engine result at top
-        let Some(bech_pos) = playground
-            .benchmark_results
-            .iter()
-            .position(|(n, _)| *n == engine_name)
+        let Some(engine) = all_engines(&CircuitImage::empty())
+            .into_iter()
+            .find(|e| e.name() == engine_name)
         else {
             return;
         };
 
-        playground.benchmark_results.swap(0, bech_pos);
-        playground.benchmark_results[1..].sort_by(|(_, a), (_, b)| b.total_cmp(a));
+        let Some(runner) = playground.runner.get() else {
+            return;
+        };
+
+        runner.set_engine(engine.new_dyn(&state.circuit));
+        playground.engine_name = Some(engine_name);
     }
 
     fn show_selected_net_info(&mut self, ui: &mut Ui) {
         let Some((x, y)) = self.cursor else { return };
-        let Some(playground) = &self.circuit_playground else {
+        let Some(runner) = self.playground.as_ref().and_then(|p| p.runner.get()) else {
             return;
         };
-        let Some(&color) = playground.circuit.colors().get_pixel_checked(x, y) else {
+
+        let circuit = runner.circuit();
+        let Some(&color) = circuit.colors().get_pixel_checked(x, y) else {
             return;
         };
 
@@ -399,112 +438,163 @@ impl MyEguiApp {
                 ui.strong(format!("value: {:.0}%", 100. * hsv_value(color)));
             });
 
-        let pixel = playground.circuit.pixel(x, y);
+        let pixel = circuit.pixel(x, y);
         if let Some(net) = pixel.net() {
             ui.strong(format!("net: {:?}", net));
 
-            if let Some(gate) = playground.circuit.get_gate(net) {
+            if let Some(gate) = circuit.get_gate(net) {
                 ui.strong(format!("gate type: {:?}", gate.ty));
                 ui.strong(format!("gate controls: {:?}", gate.controls));
                 ui.strong(format!("gate wires: {:?}", gate.wires));
             } else {
-                let gates = playground.circuit.connected_gates(net);
+                let gates = circuit.connected_gates(net);
                 ui.strong(format!("connected gates: {}", FmtIter::from(gates)));
             }
         }
     }
 
-    fn show_execution_controls(&mut self, ctx: &egui::Context, ui: &mut Ui, gl: &glow::Context) {
-        if self.circuit_playground.is_none() {
-            return;
+    fn show_execution_controls(&mut self, ctx: &egui::Context, ui: &mut Ui) {
+        // Load new benchmarks
+        if let Some(playground) = &mut self.playground
+            && let Some(benchmark_rx) = &mut playground.benchmark_rx
+        {
+            loop {
+                match benchmark_rx.try_recv() {
+                    Ok(bench) => {
+                        if let Some(slot) = playground
+                            .benchmark_results
+                            .iter_mut()
+                            .find(|b| b.engine_name == bench.engine_name)
+                        {
+                            *slot = bench;
+                        } else {
+                            playground.benchmark_results.push(bench);
+                        }
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        playground.benchmark_rx = None;
+                        break;
+                    }
+                }
+            }
+
+            // Sort them to display best one first.
+            // (Ussing stable sort since it's displayed)
+            playground
+                .benchmark_results
+                .sort_by(|a, b| b.tps.total_cmp(&a.tps));
         }
+
+        let Some(playground) = &self.playground else {
+            return;
+        };
+        let Some(state) = &playground.state else {
+            return;
+        };
+        let Some(engine_name) = playground.engine_name else {
+            return;
+        };
 
         self.separator(ui);
 
         ui.heading("Execution");
 
-        let Some(playground) = &mut self.circuit_playground else {
-            return;
+        ui.strong(format!("Tick: {}", GroupedUInt(state.tick)));
+
+        let mut selected_engine = None;
+
+        let header = if let Some(current_bench) = playground
+            .benchmark_results
+            .iter()
+            .find(|b| b.engine_name == engine_name)
+        {
+            format!("Engine TPS: {}", SiValue(current_bench.tps))
+        } else {
+            "Engine TPS: ...".into()
         };
 
-        if let Some(&(best_name, best_result)) = playground.benchmark_results.first() {
-            let current = format!("Engine: {} at {} steps/s", best_name, SiValue(best_result));
-            if playground.benchmark_results.len() == 1 {
-                ui.strong(current);
-            } else {
-                let mut selected_engine = None;
-                CollapsingHeader::new(RichText::new(current).strong())
-                    .id_salt("Circuit/BenchmarkResults/CollapsingHeader")
-                    .show(ui, |ui| {
-                        for &(name, result) in playground.benchmark_results.iter().skip(1) {
-                            let resp =
-                                ui.strong(format!("{} at {} steps/s", name, SiValue(result)));
-                            if resp.clicked() {
-                                selected_engine = Some(name);
-                            }
-                        }
-                    });
-                if let Some(engine_name) = selected_engine {
-                    self.choose_engine(engine_name);
+        CollapsingHeader::new(RichText::new(header).strong())
+            .id_salt("Circuit/BenchmarkResults/CollapsingHeader")
+            .show(ui, |ui| {
+                for benchmark in playground.benchmark_results.iter() {
+                    let resp = ui.strong(format!("{}", benchmark));
+                    if resp.clicked() {
+                        selected_engine = Some(benchmark.engine_name);
+                    }
                 }
-            }
-        }
+            });
 
-        let Some(playground) = &self.circuit_playground else {
-            return;
-        };
+        if let Some(engine_name) = selected_engine {
+            self.choose_engine(engine_name);
+        }
 
         let shortcut = |ctx: &egui::Context, modifiers: Modifiers, key: Key| {
             ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(modifiers, key)))
         };
 
-        if ui.button("Restart ").clicked() || shortcut(ctx, Modifiers::NONE, Key::R) {
-            let camera = self.circuit_canvas.camera;
-            let path = playground.path.clone();
-            let previous_playground = self.circuit_playground.take();
+        // Restart will clear the circuit, we need to draw buttons before that.
+        let restart = ui.button("Restart ").clicked() || shortcut(ctx, Modifiers::NONE, Key::R);
 
-            self.load_circuit(gl, path);
-            self.load_circuit_error_message = None;
-
-            // Restore state
-            self.circuit_playground = self.circuit_playground.take().or(previous_playground);
-            self.circuit_canvas.camera = camera;
-
-            // Get playground mutably
-            let Some(playground) = &mut self.circuit_playground else {
-                return;
-            };
-
-            playground.circuit_state = CircuitStateNets::new(&playground.circuit);
-            self.circuit_canvas
-                .load_circuit_state(gl, &playground.circuit_state);
-        }
-
-        if ui.button("Step ").clicked()
-            || shortcut(ctx, Modifiers::NONE, Key::ArrowRight)
-            || shortcut(ctx, Modifiers::NONE, Key::S)
+        if let Some(playground) = &mut self.playground
+            && let Some(runner) = &mut playground.runner.get_mut()
         {
-            // Get playground mutably
-            let Some(playground) = &mut self.circuit_playground else {
-                return;
-            };
+            if ui.button("Step ").clicked()
+                || shortcut(ctx, Modifiers::NONE, Key::ArrowRight)
+                || shortcut(ctx, Modifiers::NONE, Key::S)
+            {
+                runner.tick_n(1);
+            }
 
-            playground
-                .engine
-                .step(&playground.circuit, &mut playground.circuit_state);
-            self.circuit_canvas
-                .load_circuit_state(gl, &playground.circuit_state);
+            if runner.is_paused() {
+                if ui.button("Play").clicked() || shortcut(ctx, Modifiers::NONE, Key::Space) {
+                    let dt = Duration::from_secs_f32(1. / playground.target_tps);
+                    runner.set_tick_interval(Some(dt));
+                }
+            } else if ui.button("Stop").clicked() || shortcut(ctx, Modifiers::NONE, Key::Space) {
+                runner.set_tick_interval(None);
+            }
+
+            const MIN_TPS: f32 = 0.1;
+            const MAX_TPS: f32 = 1_000_000.;
+            let prev_target_tps = playground.target_tps;
+            ui.add(
+                egui::Slider::new(&mut playground.target_tps, MIN_TPS..=f32::INFINITY)
+                    .custom_formatter(|n, _| {
+                        if n == f64::INFINITY {
+                            "Unlimited".into()
+                        } else {
+                            SiValue(n as f32).to_string()
+                        }
+                    })
+                    .text("Max TPS")
+                    .largest_finite(MAX_TPS as f64)
+                    .logarithmic(true),
+            );
+            if prev_target_tps != playground.target_tps && !runner.is_paused() {
+                runner.set_tick_interval(Some(Duration::from_secs_f32(1. / playground.target_tps)));
+            }
+
+            if restart {
+                let path = playground.path.clone();
+                let camera = self.circuit_canvas.camera;
+                self.load_circuit(path);
+                self.circuit_canvas.camera = camera;
+            }
         }
     }
 
     fn show_circuit(&mut self, ui: &mut Ui, gl: &glow::Context) {
-        let Some(playground) = &self.circuit_playground else {
+        let Some(playground) = &self.playground else {
+            return;
+        };
+        let Some(state) = &playground.state else {
             return;
         };
 
         // --- Allocate space for the circuit canvas ---
-        let width = playground.circuit.width();
-        let height = playground.circuit.height();
+        let width = state.circuit.width();
+        let height = state.circuit.height();
         let surface_size = ui.available_size();
         let (rect, response) = ui.allocate_exact_size(surface_size, Sense::drag());
 
@@ -513,7 +603,6 @@ impl MyEguiApp {
             response.contains_pointer(),
             ui.input(|i| i.pointer.hover_pos()),
         ) {
-            // let zoom_factor = ui.input(|i| i.zoom_delta());
             let (mut zoom_factor, scroll_delta) =
                 ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta.y));
 
@@ -555,30 +644,36 @@ impl MyEguiApp {
         }
 
         // --- Net Set/Unset ---
-        let Some(playground) = &mut self.circuit_playground else {
-            return;
-        };
         if let Some((x, y)) = self.cursor
-            && let Pixel::Wire { net, .. } = playground.circuit.pixel(x, y)
+            && let Pixel::Wire { net, .. } = state.circuit.pixel(x, y)
+            && let Some(playground) = &mut self.playground
+            && let Some(runner) = playground.runner.get_mut()
+            && let Some(state) = &mut playground.state
             && net != NET_OFF
             && net != NET_ON
         {
-            if ui.input(|i| i.key_down(Key::Num1)) {
-                playground.circuit_state[net as usize] = true;
-                playground.circuit_state.update_gates(&playground.circuit);
-                self.circuit_canvas
-                    .load_circuit_state(gl, &playground.circuit_state);
-            } else if ui.input(|i| i.key_down(Key::Num0)) {
-                playground.circuit_state[net as usize] = false;
-                playground.circuit_state.update_gates(&playground.circuit);
-                self.circuit_canvas
-                    .load_circuit_state(gl, &playground.circuit_state);
+            let inputs = state.nets.inputs_mut();
+            if !inputs[net as usize] && ui.input(|i| i.key_down(Key::Num1)) {
+                inputs[net as usize] = true;
+                runner.overwrite(|r| r.state.clone_from(state));
+                self.circuit_canvas.load_circuit_state(gl, state);
+            } else if inputs[net as usize] && ui.input(|i| i.key_down(Key::Num0)) {
+                inputs[net as usize] = false;
+                runner.overwrite(|r| r.state.clone_from(state));
+                self.circuit_canvas.load_circuit_state(gl, state);
             }
         }
 
+        let Some(playground) = &self.playground else {
+            return;
+        };
+        let Some(state) = &playground.state else {
+            return;
+        };
+
         self.circuit_canvas.selected_net = self
             .cursor
-            .and_then(|(x, y)| playground.circuit.pixel(x, y).net())
+            .and_then(|(x, y)| state.circuit.pixel(x, y).net())
             .unwrap_or(0);
 
         // --- Draw Circuit ---
@@ -590,33 +685,6 @@ impl MyEguiApp {
             })),
         };
         ui.painter().add(callback);
-    }
-}
-
-struct SiValue(f32);
-
-impl fmt::Display for SiValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        const SIG_FIGS: i32 = 3;
-
-        let value = self.0;
-        let abs = value.abs();
-
-        let prefixes = [(1e12, "T"), (1e9, "G"), (1e6, "M"), (1e3, "k")];
-
-        let (scaled, suffix) = prefixes
-            .iter()
-            .find(|(factor, _)| abs >= *factor)
-            .map(|(factor, suffix)| (value / factor, *suffix))
-            .unwrap_or((value, ""));
-
-        // Number of digits before the decimal point
-        let int_digits = scaled.abs().log10().floor() as i32 + 1;
-
-        // Precision needed to reach SIG_FIGS
-        let precision = (SIG_FIGS - int_digits).max(0) as usize;
-
-        write!(f, "{:.*}{}", precision, scaled, suffix)
     }
 }
 
@@ -667,5 +735,11 @@ where
         }
         write!(f, "]")?;
         Ok(())
+    }
+}
+
+impl Display for EngineBenchmarkResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} tps  -  {}", SiValue(self.tps), self.engine_name)
     }
 }

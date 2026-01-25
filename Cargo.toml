@@ -8,10 +8,12 @@ eframe = "0.33" # UI
 egui_extras = { version = "0.33", features = ["image"] } # UI Image support
 image = "0.25" # Image support
 bytemuck = "1.24" # Cast to bytes
-smallvec = "1.15" # Vec in stack if len < N
+smallvec = "2.0.0-alpha.12" # Vec in stack if len < N
 native-dialog = "0.9" # Native file picker
 egui-file-dialog = "0.12" # Fallback file picker
 env_logger = "0.11" # Print debug info to terminal
+tokio = { version = "1.49", features = ["rt-multi-thread", "sync"] } # Async thread pool
+cpu-time = "1.0" # Instead of total time, measure CPU (more stable for our quick benchmarks)
 
 # # Compiler Backends
 # inkwell = { version = "0.8", features = ["llvm20-1"], optional = true }

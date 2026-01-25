@@ -3,60 +3,78 @@ precision mediump float;
 uniform sampler2D tex_circuit;
 uniform usampler2D tex_nets;
 uniform usamplerBuffer tex_state;
+uniform usamplerBuffer tex_input;
+
+uniform vec3 power_color;
+uniform float texel_size; // Size of a texel in surface pixel units
 
 uniform vec2 pixel_size;
-uniform uint target_net;
+uniform uint selected_net;
 
 in vec2 uv;
 out vec4 out_color;
 
 void main() {
-    float stroke_width = 1.;
-    vec2 s = pixel_size * stroke_width;
+    float stroke_width = 2.;
+    vec2 d = pixel_size; // distance to neighbour
+    if (texel_size > 2.) d += pixel_size;
 
     ivec2 tex_size = textureSize(tex_nets, 0);
-    ivec2 puv = clamp(ivec2(uv * vec2(tex_size)), ivec2(0), tex_size);
-    uint net = texelFetch(tex_nets, puv, 0).r;
+    vec2 f_pix = uv * vec2(tex_size);
+    ivec2 clamp_pix = clamp(ivec2(f_pix), ivec2(0), tex_size);
+    uint net = texelFetch(tex_nets, clamp_pix, 0).r;
 
-    // 8 Neighbours
+    // Check 8 Neighbours
     #define coord(_x, _y) clamp(ivec2((uv + vec2(_x, _y)) * vec2(tex_size)), ivec2(0), tex_size)
-    uint n0 = texelFetch(tex_nets, coord(-s.x, -s.y), 0).r;
-    uint n1 = texelFetch(tex_nets, coord( 0,   -s.y), 0).r;
-    uint n2 = texelFetch(tex_nets, coord( s.x, -s.y), 0).r;
-    uint n3 = texelFetch(tex_nets, coord(-s.x,  0),   0).r;
-    uint n4 = texelFetch(tex_nets, coord( s.x,  0),   0).r;
-    uint n5 = texelFetch(tex_nets, coord(-s.x,  s.y), 0).r;
-    uint n6 = texelFetch(tex_nets, coord( 0,    s.y), 0).r;
-    uint n7 = texelFetch(tex_nets, coord( s.x,  s.y), 0).r;
+    uint n0 = texelFetch(tex_nets, coord(-d.x, -d.y), 0).r;
+    uint n1 = texelFetch(tex_nets, coord( 0,   -d.y), 0).r;
+    uint n2 = texelFetch(tex_nets, coord( d.x, -d.y), 0).r;
+    uint n3 = texelFetch(tex_nets, coord(-d.x,  0),   0).r;
+    uint n4 = texelFetch(tex_nets, coord( d.x,  0),   0).r;
+    uint n5 = texelFetch(tex_nets, coord(-d.x,  d.y), 0).r;
+    uint n6 = texelFetch(tex_nets, coord( 0,    d.y), 0).r;
+    uint n7 = texelFetch(tex_nets, coord( d.x,  d.y), 0).r;
 
+    uint nets = uint(textureSize(tex_state)) / 2u;
     uint net_state = texelFetch(tex_state, int(net)).r;
+    uint inp_state = texelFetch(tex_state, int(net + nets)).r;
+
+    bool is_border = n0 != net || n1 != net || n2 != net || n3 != net
+        || n4 != net || n5 != net || n6 != net || n7 != net;
+
+    // Draw powered inputs border
+    if (inp_state != 0u && net != 1u && is_border) {
+        out_color.rgb = power_color;
+        return;
+    }
 
     out_color = texture(tex_circuit, uv);
 
+    // Draw on/off nets
     if (net_state == 0u) {
         out_color.rgb = out_color.rgb / 1.5;
     } else {
         out_color.rgb = out_color.rgb * 1.5;
     }
 
-    if (target_net > 0u) {
-        if (target_net == net) {
-            ivec2 p = ivec2(gl_FragCoord);
-            // if (p.x % 2 == 0 && p.y % 2 == 0) {
-            if ((p.x + p.y / 2) % 2 == 0 && p.y % 2 == 0) {
-            // if (p.x % 2 == p.y % 2){
-                out_color.rgb += vec3(0.3);
-            } else {
-                // Companate brightness given previously
-                out_color.rgb -= vec3(0.1);
-            }
-        }
-        else if (target_net == n0 || target_net == n1
-              || target_net == n2 || target_net == n3
-              || target_net == n4 || target_net == n5
-              || target_net == n6 || target_net == n7)
-            out_color = vec4(255);
-        // else if (net > 0u)
-        //     out_color.rgb *= 0.5;
+    // Continue only if a net is selected
+    if (selected_net == 0u) return;
+
+    // Draw selected net
+    if (selected_net == net) {
+        ivec2 p = ivec2(gl_FragCoord);
+        bool pattern = (p.x + p.y / 2) % 2 == 0 && p.y % 2 == 0;
+        if (is_border || pattern) out_color.rgb += vec3(0.3);
+        else out_color.rgb -= vec3(0.05); // Compensate brightness given previously
+        return;
+    }
+
+    // Draw selected net outside border
+    if (selected_net == n0 || selected_net == n1
+          || selected_net == n2 || selected_net == n3
+          || selected_net == n4 || selected_net == n5
+          || selected_net == n6 || selected_net == n7) {
+        out_color = vec4(255);
+        return;
     }
 }

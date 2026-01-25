@@ -3,6 +3,26 @@ use std::{
     time::{Duration, Instant},
 };
 
+use cpu_time::ProcessTime;
+
+#[derive(Clone, Copy)]
+enum FallbackInstant {
+    Cpu(ProcessTime),
+    Global(Instant),
+}
+
+impl FallbackInstant {
+    pub fn now() -> Self {
+        ProcessTime::try_now().map_or_else(|_| Self::Global(Instant::now()), Self::Cpu)
+    }
+    pub fn elapsed(self) -> Option<f64> {
+        match self {
+            Self::Cpu(t) => t.try_elapsed().map(|d| d.as_secs_f64()).ok(),
+            Self::Global(t) => Some(t.elapsed().as_secs_f64()),
+        }
+    }
+}
+
 pub fn bench_seconds<I, R, F>(input: &mut I, mut f: F, min_time: Duration) -> f32
 where
     F: FnMut(&mut I) -> R,
@@ -10,14 +30,18 @@ where
     let mut samples = Vec::new();
     let bench_start = Instant::now();
 
-    let start = Instant::now();
+    let start = FallbackInstant::now();
     black_box(f(black_box(input)));
-    samples.push(start.elapsed().as_secs_f64());
+    if let Some(t) = start.elapsed() {
+        samples.push(t);
+    }
 
     while bench_start.elapsed() < min_time {
-        let start = Instant::now();
+        let start = FallbackInstant::now();
         black_box(f(black_box(input)));
-        samples.push(start.elapsed().as_secs_f64());
+        if let Some(t) = start.elapsed() {
+            samples.push(t);
+        }
     }
 
     if samples.is_empty() {
@@ -25,8 +49,8 @@ where
     }
 
     // --- Discard first iterations ---
-    const WARMUP_ITERATIONS: usize = 4;
-    const MAX_WARMUP_RATIO: usize = 8; // max of 1 warmup per every 8 samples
+    const WARMUP_ITERATIONS: usize = 64;
+    const MAX_WARMUP_RATIO: usize = 16; // max of 1 warmup per every 16 samples
 
     let warmup = WARMUP_ITERATIONS.min(samples.len() / MAX_WARMUP_RATIO);
     let samples = &mut samples[warmup..];

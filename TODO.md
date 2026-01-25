@@ -3,6 +3,8 @@
 - Display net id as a clickable (inline button) that lets user hover and select such net.
 - CollaspsableHeaders aligned with content.
 - Measure and show Parsing and Engine Compilation times
+- Do not force repaint when idle
+- Icons, (Folder image?)
 
 ## Engine Optimization
 
@@ -16,4 +18,5 @@
 
 ## Others
 
-Use tokyo or a background thread for parsing, compiling and benchmarking.
+- Make the backend track simulation states every few ms,
+  then we can jumb backwards in time by simulating from closest point.

@@ -6,7 +6,7 @@ use eframe::{
 
 pub use camera::*;
 
-use crate::circuit::CircuitImage;
+use crate::circuit::{CircuitImage, CircuitState};
 
 mod camera;
 
@@ -145,16 +145,28 @@ impl CircuitCanvas {
 
             gl.bind_texture(glow::TEXTURE_BUFFER, Some(self.tex_state));
             gl.tex_buffer(glow::TEXTURE_BUFFER, glow::R8, Some(self.buffer_state));
+
+            gl.use_program(Some(self.shader_program));
+            gl.uniform_3_f32(
+                Some(
+                    &gl.get_uniform_location(self.shader_program, "power_color")
+                        .unwrap(),
+                ),
+                circuit.power_color()[0] as f32 / 255.,
+                circuit.power_color()[1] as f32 / 255.,
+                circuit.power_color()[2] as f32 / 255.,
+            );
+
             check_for_gl_error!(gl);
         }
     }
 
-    pub fn load_circuit_state(&mut self, gl: &glow::Context, circuit_state: &[bool]) {
+    pub fn load_circuit_state(&mut self, gl: &glow::Context, circuit_state: &CircuitState) {
         unsafe {
             gl.bind_buffer(glow::TEXTURE_BUFFER, Some(self.buffer_state));
             gl.buffer_data_u8_slice(
                 glow::TEXTURE_BUFFER,
-                bytemuck::cast_slice(circuit_state),
+                bytemuck::cast_slice(circuit_state.nets.as_concat()),
                 glow::DYNAMIC_DRAW,
             );
             check_for_gl_error!(gl);
@@ -175,6 +187,7 @@ impl CircuitCanvas {
         let tex_nets = self.tex_nets;
         let tex_state = self.tex_state;
         let selected_net = self.selected_net;
+        let texel_size = self.camera.surface_pixels_per_texel();
 
         move |gl| unsafe {
             gl.use_program(Some(program));
@@ -197,7 +210,6 @@ impl CircuitCanvas {
                 Some(&gl.get_uniform_location(program, "tex_state").unwrap()),
                 2,
             );
-
             gl.uniform_2_f32(
                 Some(&gl.get_uniform_location(program, "uv_min").unwrap()),
                 uv_min.x,
@@ -209,6 +221,11 @@ impl CircuitCanvas {
                 uv_size.y,
             );
 
+            gl.uniform_1_f32(
+                Some(&gl.get_uniform_location(program, "texel_size").unwrap()),
+                texel_size,
+            );
+
             let pixel_size = uv_size / surface_size;
             gl.uniform_2_f32(
                 Some(&gl.get_uniform_location(program, "pixel_size").unwrap()),
@@ -217,7 +234,7 @@ impl CircuitCanvas {
             );
 
             gl.uniform_1_u32(
-                Some(&gl.get_uniform_location(program, "target_net").unwrap()),
+                Some(&gl.get_uniform_location(program, "selected_net").unwrap()),
                 selected_net,
             );
 
