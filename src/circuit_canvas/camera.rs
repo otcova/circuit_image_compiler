@@ -56,13 +56,13 @@ impl Camera {
         self.zoom_texture(zoom_factor, self.surface_to_texel(center, surface_size));
     }
 
-    /// Texel space → Surface pixel space
+    /// Texel space -> Surface pixel space
     #[allow(dead_code)]
     pub fn texel_to_surface(&self, texel_pos: Vec2, surface_size: Vec2) -> Vec2 {
         (texel_pos - self.position) * self.scale + surface_size * 0.5
     }
 
-    /// Surface pixel space → Texel space
+    /// Surface pixel space -> Texel space
     pub fn surface_to_texel(&self, surface_pos: Vec2, surface_size: Vec2) -> Vec2 {
         (surface_pos - surface_size * 0.5) / self.scale + self.position
     }

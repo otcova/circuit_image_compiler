@@ -111,7 +111,7 @@ pub struct CircuitImage {
     /// - the type of gate
     /// - the index of all the gates connected (that control the behaviour)
     /// - all the wires connected to it.
-    gates: Vec<Gate>,
+    pub gates: Vec<Gate>,
 
     /// The amount of gates that are a not or buffer gate.
     /// TODO: Also consider permanent on/off grates as trivial?.
@@ -242,6 +242,13 @@ impl CircuitImage {
 
     pub fn power_color(&self) -> Rgb<u8> {
         self.power_color
+    }
+    pub fn active_gate_color(&self) -> Rgb<u8> {
+        self.active_gate_color
+    }
+
+    pub fn passive_gate_color(&self) -> Rgb<u8> {
+        self.passive_gate_color
     }
 
     fn net_at(&self, x: u32, y: u32) -> u32 {
@@ -775,6 +782,26 @@ impl CircuitImage {
         }
 
         // --- Remove unconnected wires and gates ---
+        // Remove permanent gates without controls
+        for (gate_net, gate_slot) in gates.iter_mut().enumerate() {
+            if let Some(gate) = gate_slot
+                && gate.controls.is_empty()
+            {
+                if gate.ty == GateType::Active {
+                    if let Some(&wire_net) = gate.wires.first() {
+                        for &net in &gate.wires[1..] {
+                            net_aliases.alias(wire_net, net);
+                        }
+                        net_aliases.alias(gate_net as u32, wire_net);
+                    } else {
+                        net_aliases.alias(gate_net as u32, NET_OFF);
+                    }
+                }
+                *gate_slot = None;
+            }
+        }
+
+        // Check which wires are connected to which nets
         let mut used_wires = vec![false; net_aliases.len() as usize];
         for gate in gates.iter().flatten() {
             for &net in &gate.wires {

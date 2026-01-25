@@ -125,7 +125,14 @@ impl MyEguiApp {
 
 impl eframe::App for MyEguiApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        ctx.request_repaint();
+        // Force at least 20fps when running
+        if let Some(playground) = &self.playground
+            && let Some(circuit) = &playground.circuit
+            && !circuit.runner.is_paused()
+        {
+            ctx.request_repaint_after_secs(1. / 20.);
+        }
+
         let gl = frame.gl().unwrap();
 
         // Close App?

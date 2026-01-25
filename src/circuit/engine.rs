@@ -4,7 +4,7 @@ use super::*;
 use std::time::Duration;
 
 pub fn default_engine(_circuit: &CircuitImage) -> impl CircuitEngine + 'static {
-    CircuitEngineUf::default()
+    CircuitEngineDfs::default()
 }
 
 pub fn all_engines(_circuit: &CircuitImage) -> SmallVec<Box<dyn CircuitEngine>, 16> {
@@ -146,6 +146,7 @@ impl CircuitEngineUf {
         self.wire_connections.clear();
         self.wire_connections.extend(state.image.wire_count());
 
+        // TODO: init here with push instead of extend
         for (net, &is_powered) in state.nets.inputs().iter().enumerate() {
             if is_powered {
                 self.wire_connections.set_parent_unchecked(net as u32, 0);
@@ -198,7 +199,7 @@ pub struct CircuitEngineDfs {
     dfs_stack: Vec<u32>,
 
     /// Weather a certain gate is or not connection its wires.
-    connection_state: Vec<bool>,
+    non_trivial_is_connected: Vec<bool>,
 }
 
 impl CircuitEngine for CircuitEngineDfs {
@@ -243,10 +244,11 @@ impl CircuitEngineDfs {
             }
         }
 
-        self.connection_state.clear();
+        self.non_trivial_is_connected.clear();
         for gate in &state.image.non_trivial_gates {
-            let toggled = gate.controls.iter().all(|&net| nets[net as usize]);
-            self.connection_state.push(gate.ty.connects_wires(toggled));
+            let is_toggled = gate.controls.iter().all(|&net| nets[net as usize]);
+            let is_connected = gate.ty.connects_wires(is_toggled);
+            self.non_trivial_is_connected.push(is_connected);
         }
 
         self.dfs_stack.clear();
@@ -263,8 +265,8 @@ impl CircuitEngineDfs {
                 // Visit all edges (gates)
                 for &gate_idx in &state.image.wires_non_trivial[wire as usize] {
                     // If edge is enabled (gate connects wires)
-                    if self.connection_state[gate_idx as usize] {
-                        self.connection_state[gate_idx as usize] = true;
+                    if self.non_trivial_is_connected[gate_idx as usize] {
+                        self.non_trivial_is_connected[gate_idx as usize] = true;
                         // Visit the neighbours
                         for &neighbour in &state.image.non_trivial_gates[gate_idx as usize].wires {
                             if !nets[neighbour as usize] {

@@ -14,15 +14,17 @@ pub struct CircuitCanvas {
     tex_size: Vec2,
     tex_image: glow::Texture,
     tex_nets: glow::Texture,
-    tex_state: glow::Texture,
-    buffer_state: glow::Buffer,
+    tex_net_state: glow::Texture,
+    buffer_net_state: glow::Buffer,
 
     shader_program: glow::Program,
     vertex_array: glow::VertexArray,
 
     pub camera: Camera,
-
     pub selected_net: u32,
+
+    /// Temporary buffer to compute if a gate is or not connected.
+    gate_state: Vec<bool>,
 }
 
 impl CircuitCanvas {
@@ -62,9 +64,9 @@ impl CircuitCanvas {
             texture
         };
 
-        let buffer_state = unsafe { gl.create_buffer().unwrap() };
+        let buffer_net_state = unsafe { gl.create_buffer().unwrap() };
 
-        let tex_state = unsafe {
+        let tex_net_state = unsafe {
             let texture = gl.create_texture().unwrap();
             gl.bind_texture(glow::TEXTURE_BUFFER, Some(texture));
             gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
@@ -76,12 +78,13 @@ impl CircuitCanvas {
             tex_size: Vec2::ZERO,
             tex_image,
             tex_nets,
-            tex_state,
-            buffer_state,
+            tex_net_state,
+            buffer_net_state,
             shader_program,
             vertex_array,
             camera: Camera::new(),
             selected_net: 0,
+            gate_state: Vec::new(),
         }
     }
 
@@ -93,8 +96,8 @@ impl CircuitCanvas {
         unsafe {
             gl.delete_texture(self.tex_image);
             gl.delete_texture(self.tex_nets);
-            gl.delete_texture(self.tex_state);
-            gl.delete_buffer(self.buffer_state);
+            gl.delete_texture(self.tex_net_state);
+            gl.delete_buffer(self.buffer_net_state);
 
             gl.delete_vertex_array(self.vertex_array);
             gl.delete_program(self.shader_program);
@@ -136,15 +139,15 @@ impl CircuitCanvas {
                 glow::PixelUnpackData::Slice(Some(bytemuck::cast_slice(circuit.nets()))),
             );
 
-            gl.bind_buffer(glow::TEXTURE_BUFFER, Some(self.buffer_state));
+            gl.bind_buffer(glow::TEXTURE_BUFFER, Some(self.buffer_net_state));
             gl.buffer_data_size(
                 glow::TEXTURE_BUFFER,
-                circuit.net_count() as i32,
+                (2 * circuit.net_count() + circuit.gate_count()) as i32,
                 glow::DYNAMIC_DRAW,
             );
 
-            gl.bind_texture(glow::TEXTURE_BUFFER, Some(self.tex_state));
-            gl.tex_buffer(glow::TEXTURE_BUFFER, glow::R8, Some(self.buffer_state));
+            gl.bind_texture(glow::TEXTURE_BUFFER, Some(self.tex_net_state));
+            gl.tex_buffer(glow::TEXTURE_BUFFER, glow::R8, Some(self.buffer_net_state));
 
             gl.use_program(Some(self.shader_program));
             gl.uniform_3_f32(
@@ -156,18 +159,72 @@ impl CircuitCanvas {
                 circuit.power_color()[1] as f32 / 255.,
                 circuit.power_color()[2] as f32 / 255.,
             );
+            gl.uniform_3_f32(
+                Some(
+                    &gl.get_uniform_location(self.shader_program, "active_color")
+                        .unwrap(),
+                ),
+                circuit.active_gate_color()[0] as f32 / 255.,
+                circuit.active_gate_color()[1] as f32 / 255.,
+                circuit.active_gate_color()[2] as f32 / 255.,
+            );
+            gl.uniform_3_f32(
+                Some(
+                    &gl.get_uniform_location(self.shader_program, "passive_color")
+                        .unwrap(),
+                ),
+                circuit.passive_gate_color()[0] as f32 / 255.,
+                circuit.passive_gate_color()[1] as f32 / 255.,
+                circuit.passive_gate_color()[2] as f32 / 255.,
+            );
+            gl.uniform_1_u32(
+                Some(
+                    &gl.get_uniform_location(self.shader_program, "net_count")
+                        .unwrap(),
+                ),
+                circuit.net_count(),
+            );
+            gl.uniform_1_u32(
+                Some(
+                    &gl.get_uniform_location(self.shader_program, "wire_count")
+                        .unwrap(),
+                ),
+                circuit.wire_count(),
+            );
 
             check_for_gl_error!(gl);
         }
     }
 
-    pub fn load_circuit_state(&mut self, gl: &glow::Context, circuit_state: &CircuitState) {
+    pub fn load_circuit_state(&mut self, gl: &glow::Context, state: &CircuitState) {
+        let nets = state.nets.get();
+        let nets_and_inputs = state.nets.as_concat();
+
         unsafe {
-            gl.bind_buffer(glow::TEXTURE_BUFFER, Some(self.buffer_state));
-            gl.buffer_data_u8_slice(
+            gl.bind_buffer(glow::TEXTURE_BUFFER, Some(self.buffer_net_state));
+            gl.buffer_sub_data_u8_slice(
                 glow::TEXTURE_BUFFER,
-                bytemuck::cast_slice(circuit_state.nets.as_concat()),
-                glow::DYNAMIC_DRAW,
+                0,
+                bytemuck::cast_slice(nets_and_inputs),
+            );
+
+            // TODO: remove this
+            // gl.buffer_data_u8_slice(
+            //     glow::TEXTURE_BUFFER,
+            //     bytemuck::cast_slice(state.nets.as_concat()),
+            //     glow::DYNAMIC_DRAW,
+            // );
+
+            self.gate_state.clear();
+            for gate in &state.image.gates {
+                let is_toggled = gate.controls.iter().all(|&net| nets[net as usize]);
+                self.gate_state.push(is_toggled);
+            }
+
+            gl.buffer_sub_data_u8_slice(
+                glow::TEXTURE_BUFFER,
+                nets_and_inputs.len() as i32,
+                bytemuck::cast_slice(&self.gate_state),
             );
             check_for_gl_error!(gl);
         }
@@ -185,7 +242,7 @@ impl CircuitCanvas {
         let vertex_array = self.vertex_array;
         let tex_image = self.tex_image;
         let tex_nets = self.tex_nets;
-        let tex_state = self.tex_state;
+        let tex_net_state = self.tex_net_state;
         let selected_net = self.selected_net;
         let texel_size = self.camera.surface_pixels_per_texel();
 
@@ -205,9 +262,9 @@ impl CircuitCanvas {
                 1,
             );
             gl.active_texture(glow::TEXTURE2);
-            gl.bind_texture(glow::TEXTURE_BUFFER, Some(tex_state));
+            gl.bind_texture(glow::TEXTURE_BUFFER, Some(tex_net_state));
             gl.uniform_1_i32(
-                Some(&gl.get_uniform_location(program, "tex_state").unwrap()),
+                Some(&gl.get_uniform_location(program, "tex_net_state").unwrap()),
                 2,
             );
             gl.uniform_2_f32(
@@ -232,7 +289,6 @@ impl CircuitCanvas {
                 pixel_size.x,
                 pixel_size.y,
             );
-
             gl.uniform_1_u32(
                 Some(&gl.get_uniform_location(program, "selected_net").unwrap()),
                 selected_net,
