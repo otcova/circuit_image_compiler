@@ -102,11 +102,11 @@ impl CircuitCanvas {
         }
     }
 
-    pub fn load_circuit(&mut self, gl: &glow::Context, circuit: &CircuitImage) {
+    // pub fn load_circuit(&mut self, gl: &glow::Context, circuit: &CircuitImage, camera: Camera) {
+    //     self.camera = camera;
+    pub fn load_circuit(&mut self, gl: &glow::Context, circuit: &CircuitImage, camera: Camera) {
         self.tex_size = Vec2::new(circuit.width() as f32, circuit.height() as f32);
-        self.camera.position = self.tex_size / 2.;
-        self.camera
-            .set_surface_pixels_per_texel(500. / self.tex_size.y);
+        self.camera = camera;
 
         unsafe {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.tex_image));

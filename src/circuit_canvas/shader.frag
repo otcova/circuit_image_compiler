@@ -62,10 +62,7 @@ void main() {
 
     // Draw selected net
     if (selected_net == net) {
-        ivec2 p = ivec2(gl_FragCoord);
-        bool pattern = (p.x + p.y / 2) % 2 == 0 && p.y % 2 == 0;
-        if (is_border || pattern) out_color.rgb += vec3(0.3);
-        else out_color.rgb -= vec3(0.05); // Compensate brightness given previously
+        if (is_border) out_color.rgb += vec3(0.3);
         return;
     }
 

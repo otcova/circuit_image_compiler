@@ -32,7 +32,6 @@ impl Clone for CircuitRuntime {
 }
 
 pub struct CircuitRunner {
-    circuit: Arc<CircuitImage>,
     is_paused: bool,
 
     // Runtime thread will only block the mutex quickly to update the state with memcpy,
@@ -46,9 +45,8 @@ impl CircuitRunner {
     const UPDATE_INTERVAL: Duration = Duration::from_millis(8);
 
     pub fn new(state: CircuitState, engine: Box<dyn CircuitEngine>) -> Self {
-        let circuit_clone = state.circuit.clone();
         let shared_runtime = Arc::new(SyncState::new(CircuitRuntime {
-            engine: engine.new_dyn(&state.circuit),
+            engine: engine.new_dyn(&state.image),
             state: state.clone(),
             tick_interval: None,
             exit: false,
@@ -93,7 +91,6 @@ impl CircuitRunner {
         });
 
         Self {
-            circuit: circuit_clone,
             runtime: shared_runtime_clone,
             is_paused: true,
         }
@@ -133,10 +130,6 @@ impl CircuitRunner {
             self.is_paused = r.tick_interval.is_none();
             result
         })
-    }
-
-    pub fn circuit(&self) -> &CircuitImage {
-        &self.circuit
     }
 }
 

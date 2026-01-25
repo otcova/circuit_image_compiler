@@ -9,8 +9,8 @@ pub fn default_engine(_circuit: &CircuitImage) -> impl CircuitEngine + 'static {
 
 pub fn all_engines(_circuit: &CircuitImage) -> SmallVec<Box<dyn CircuitEngine>, 16> {
     SmallVec::from_buf([
-        Box::new(CircuitEngineUf::default()),
         Box::new(CircuitEngineDfs::default()),
+        Box::new(CircuitEngineUf::default()),
     ])
 }
 
@@ -103,15 +103,15 @@ impl CircuitState {
     /// Since this marks the end of a tick, this function also increments the `tick` counter
     fn update_gates(&mut self) {
         let nets = self.nets.get_mut();
-        for (gate_i, gate) in self.circuit.gates.iter().enumerate() {
-            let gate_net = gate_i + self.circuit.wire_count() as usize;
+        for (gate_i, gate) in self.image.gates.iter().enumerate() {
+            let gate_net = gate_i + self.image.wire_count() as usize;
             nets[gate_net] = gate.wires.iter().any(|&net| nets[net as usize]);
         }
         self.tick += 1;
     }
 
     fn apply_inputs(&mut self) {
-        let wires = self.circuit.wire_count() as usize;
+        let wires = self.image.wire_count() as usize;
         let (nets, inputs) = self.nets.nets_and_inputs_mut();
         nets[..wires].copy_from_slice(&inputs[..wires]);
     }
@@ -126,7 +126,7 @@ pub struct CircuitEngineUf {
 
 impl CircuitEngine for CircuitEngineUf {
     fn name(&self) -> &'static str {
-        "UnionFind + Trivial"
+        "Union-Find"
     }
 
     fn clone_dyn(&self) -> Box<dyn CircuitEngine> {
@@ -144,7 +144,7 @@ impl CircuitEngineUf {
     /// Given the state of the gates, compute the state of the wires.
     pub fn update_wires(&mut self, state: &mut CircuitState) {
         self.wire_connections.clear();
-        self.wire_connections.extend(state.circuit.wire_count());
+        self.wire_connections.extend(state.image.wire_count());
 
         for (net, &is_powered) in state.nets.inputs().iter().enumerate() {
             if is_powered {
@@ -154,7 +154,7 @@ impl CircuitEngineUf {
 
         let nets = state.nets.get_mut();
 
-        for buffer_gate in &state.circuit.buffer_gates {
+        for buffer_gate in &state.image.buffer_gates {
             let toggled = buffer_gate.controls.iter().all(|&net| nets[net as usize]);
             if GateType::Passive.connects_wires(toggled) {
                 for &net in &buffer_gate.wires {
@@ -163,7 +163,7 @@ impl CircuitEngineUf {
             }
         }
 
-        for not_gate in &state.circuit.not_gates {
+        for not_gate in &state.image.not_gates {
             let toggled = not_gate.controls.iter().all(|&net| nets[net as usize]);
             if GateType::Active.connects_wires(toggled) {
                 for &net in &not_gate.wires {
@@ -173,7 +173,7 @@ impl CircuitEngineUf {
         }
 
         // Connect nets from gates
-        for gate in &state.circuit.non_trivial_gates {
+        for gate in &state.image.non_trivial_gates {
             let toggled = gate.controls.iter().all(|&net| nets[net as usize]);
             if gate.ty.connects_wires(toggled) {
                 for net in gate.wires.windows(2) {
@@ -183,7 +183,7 @@ impl CircuitEngineUf {
         }
 
         // Write wire state
-        for wire_net in 1..state.circuit.wire_count() {
+        for wire_net in 1..state.image.wire_count() {
             // Since we are iterating in order, and NET_ON is lower than the visited,
             // we can use grandparent instead of root.
             nets[wire_net as usize] = self.wire_connections.has_grandparent(wire_net, 0);
@@ -203,7 +203,7 @@ pub struct CircuitEngineDfs {
 
 impl CircuitEngine for CircuitEngineDfs {
     fn name(&self) -> &'static str {
-        "DFS + Trivial"
+        "DFS"
     }
 
     fn clone_dyn(&self) -> Box<dyn CircuitEngine> {
@@ -225,7 +225,7 @@ impl CircuitEngineDfs {
         state.apply_inputs();
         let nets = state.nets.get_mut();
 
-        for buffer_gate in &state.circuit.buffer_gates {
+        for buffer_gate in &state.image.buffer_gates {
             let toggled = buffer_gate.controls.iter().all(|&net| nets[net as usize]);
             if GateType::Passive.connects_wires(toggled) {
                 for &net in &buffer_gate.wires {
@@ -234,7 +234,7 @@ impl CircuitEngineDfs {
             }
         }
 
-        for not_gate in &state.circuit.not_gates {
+        for not_gate in &state.image.not_gates {
             let toggled = not_gate.controls.iter().all(|&net| nets[net as usize]);
             if GateType::Active.connects_wires(toggled) {
                 for &net in &not_gate.wires {
@@ -244,13 +244,13 @@ impl CircuitEngineDfs {
         }
 
         self.connection_state.clear();
-        for gate in &state.circuit.non_trivial_gates {
+        for gate in &state.image.non_trivial_gates {
             let toggled = gate.controls.iter().all(|&net| nets[net as usize]);
             self.connection_state.push(gate.ty.connects_wires(toggled));
         }
 
         self.dfs_stack.clear();
-        for root_wire in NET_ON..state.circuit.wire_count() {
+        for root_wire in NET_ON..state.image.wire_count() {
             // We use state as visited map for the dfs
             if !nets[root_wire as usize] {
                 continue;
@@ -261,13 +261,12 @@ impl CircuitEngineDfs {
             // For all queued nodes (wires)
             while let Some(wire) = self.dfs_stack.pop() {
                 // Visit all edges (gates)
-                for &gate_idx in &state.circuit.wires_non_trivial[wire as usize] {
+                for &gate_idx in &state.image.wires_non_trivial[wire as usize] {
                     // If edge is enabled (gate connects wires)
                     if self.connection_state[gate_idx as usize] {
                         self.connection_state[gate_idx as usize] = true;
                         // Visit the neighbours
-                        for &neighbour in &state.circuit.non_trivial_gates[gate_idx as usize].wires
-                        {
+                        for &neighbour in &state.image.non_trivial_gates[gate_idx as usize].wires {
                             if !nets[neighbour as usize] {
                                 self.dfs_stack.push(neighbour);
                                 nets[neighbour as usize] = true;

@@ -912,7 +912,7 @@ impl CircuitImage {
 }
 
 pub struct CircuitState {
-    pub circuit: Arc<CircuitImage>,
+    pub image: Arc<CircuitImage>,
     pub nets: CircuitStateNets,
     pub tick: u64,
 }
@@ -922,7 +922,7 @@ impl CircuitState {
         Self {
             tick: 0,
             nets: CircuitStateNets::new(&circuit),
-            circuit,
+            image: circuit,
         }
     }
 }
@@ -930,14 +930,14 @@ impl CircuitState {
 impl Clone for CircuitState {
     fn clone(&self) -> Self {
         Self {
-            circuit: self.circuit.clone(),
+            image: self.image.clone(),
             nets: self.nets.clone(),
             tick: self.tick,
         }
     }
     fn clone_from(&mut self, other: &Self) {
-        if !Arc::ptr_eq(&self.circuit, &other.circuit) {
-            self.circuit.clone_from(&other.circuit);
+        if !Arc::ptr_eq(&self.image, &other.image) {
+            self.image.clone_from(&other.image);
         }
         self.nets.clone_from(&other.nets);
         self.tick = other.tick;
