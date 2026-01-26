@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use eframe::{
     egui::{self, Vec2},
     egui_glow::check_for_gl_error,
@@ -24,6 +26,7 @@ pub struct CircuitCanvas {
     pub selected_net: u32,
 
     /// Temporary buffer to compute if a gate is or not connected.
+    state: CircuitState,
     gate_state: Vec<bool>,
 }
 
@@ -84,6 +87,7 @@ impl CircuitCanvas {
             vertex_array,
             camera: Camera::new(),
             selected_net: 0,
+            state: CircuitState::new(Arc::new(CircuitImage::empty())),
             gate_state: Vec::new(),
         }
     }
@@ -197,10 +201,26 @@ impl CircuitCanvas {
     }
 
     pub fn load_circuit_state(&mut self, gl: &glow::Context, state: &CircuitState) {
-        let nets = state.nets.get();
-        let nets_and_inputs = state.nets.as_concat();
+        // Get state
+        self.state.clone_from(state);
+
+        // Compute if gates are toggled
+        self.gate_state.clear();
+        for gate in &state.image.gates {
+            let nets = state.nets.get();
+            let is_toggled = if gate.wires.len() <= 1 {
+                false
+            } else {
+                gate.controls.iter().all(|&net| nets[net as usize])
+            };
+            self.gate_state.push(is_toggled);
+        }
+
+        // Compute gates power
+        self.state.update_gates();
 
         unsafe {
+            let nets_and_inputs = self.state.nets.as_concat();
             gl.bind_buffer(glow::TEXTURE_BUFFER, Some(self.buffer_net_state));
             gl.buffer_sub_data_u8_slice(
                 glow::TEXTURE_BUFFER,
@@ -214,12 +234,6 @@ impl CircuitCanvas {
             //     bytemuck::cast_slice(state.nets.as_concat()),
             //     glow::DYNAMIC_DRAW,
             // );
-
-            self.gate_state.clear();
-            for gate in &state.image.gates {
-                let is_toggled = gate.controls.iter().all(|&net| nets[net as usize]);
-                self.gate_state.push(is_toggled);
-            }
 
             gl.buffer_sub_data_u8_slice(
                 glow::TEXTURE_BUFFER,

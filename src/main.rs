@@ -125,12 +125,14 @@ impl MyEguiApp {
 
 impl eframe::App for MyEguiApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        // Force at least 20fps when running
+        // Force at least 20fps when running and 1fps when not.
         if let Some(playground) = &self.playground
             && let Some(circuit) = &playground.circuit
             && !circuit.runner.is_paused()
         {
             ctx.request_repaint_after_secs(1. / 20.);
+        } else {
+            ctx.request_repaint_after_secs(1.);
         }
 
         let gl = frame.gl().unwrap();
@@ -493,6 +495,9 @@ impl MyEguiApp {
             } else {
                 let gates = image.connected_gates(net);
                 ui.strong(format!("connected gates: {}", FmtIter::from(gates)));
+
+                let arrow = image.get_arrows(x, y);
+                ui.strong(format!("arrows: {}, {}", arrow.0, arrow.1));
             }
         }
     }

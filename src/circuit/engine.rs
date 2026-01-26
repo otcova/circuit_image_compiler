@@ -66,7 +66,9 @@ pub struct CircuitStateNets(pub Box<[bool]>);
 impl CircuitStateNets {
     pub fn new(circuit: &CircuitImage) -> Self {
         let mut nets = Self(vec![false; circuit.net_count() as usize * 2].into_boxed_slice());
-        nets.inputs_mut()[NET_ON as usize] = true;
+        if let Some(power_net) = nets.inputs_mut().get_mut(NET_ON as usize) {
+            *power_net = true;
+        }
         nets
     }
     pub fn reset(&mut self) {
@@ -101,7 +103,7 @@ impl CircuitStateNets {
 impl CircuitState {
     /// Given the state of the wires, compute the state of the gates.
     /// Since this marks the end of a tick, this function also increments the `tick` counter
-    fn update_gates(&mut self) {
+    pub fn update_gates(&mut self) {
         let nets = self.nets.get_mut();
         for (gate_i, gate) in self.image.gates.iter().enumerate() {
             let gate_net = gate_i + self.image.wire_count() as usize;
@@ -133,10 +135,14 @@ impl CircuitEngine for CircuitEngineUf {
         Box::new(Self::default())
     }
 
-    /// Perfoms a single step. Equivalent to `update_wires()` + `update_gates()`
+    /// Perfoms a single tick. Equivalent to `update_wires()` + `update_gates()`
     fn tick(&mut self, state: &mut CircuitState) {
-        self.update_wires(state);
-        state.update_gates();
+        if state.tick.is_multiple_of(2) {
+            self.update_wires(state);
+            state.tick += 1;
+        } else {
+            state.update_gates();
+        }
     }
 }
 
@@ -213,8 +219,12 @@ impl CircuitEngine for CircuitEngineDfs {
 
     /// Perfoms a single step. Equivalent to `update_wires()` + `update_gates()`
     fn tick(&mut self, state: &mut CircuitState) {
-        self.update_wires(state);
-        state.update_gates();
+        if state.tick.is_multiple_of(2) {
+            self.update_wires(state);
+            state.tick += 1;
+        } else {
+            state.update_gates();
+        }
     }
 }
 
