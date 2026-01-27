@@ -209,7 +209,7 @@ impl CircuitCanvas {
         for gate in &state.image.gates {
             let nets = state.nets.get();
             let is_toggled = if gate.wires.len() <= 1 {
-                false
+                true
             } else {
                 gate.controls.iter().all(|&net| nets[net as usize])
             };

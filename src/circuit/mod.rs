@@ -26,8 +26,8 @@ impl GateType {
     /// Returns weather it connects (or not) the wires if all controls are set (if toggled).
     pub fn connects_wires(self, toggled: bool) -> bool {
         match self {
-            GateType::Passive => toggled,
-            GateType::Active => !toggled,
+            GateType::Passive => !toggled,
+            GateType::Active => toggled,
         }
     }
 }
@@ -1094,25 +1094,25 @@ impl CircuitImage {
         //     }
         // }
 
-        // --- Remove unconnected wires and gates ---
-        // Remove permanent gates without controls
-        for (gate_net, gate_slot) in gates.iter_slots() {
-            if let Some(gate) = gate_slot
-                && gate.controls.is_empty()
-            {
-                if gate.ty == GateType::Active {
-                    if let Some(&wire_net) = gate.wires.first() {
-                        for &net in &gate.wires[1..] {
-                            net_aliases.alias(wire_net, net);
-                        }
-                        net_aliases.alias(gate_net as u32, wire_net);
-                    } else {
-                        net_aliases.alias(gate_net as u32, NET_OFF);
-                    }
-                }
-                *gate_slot = None;
-            }
-        }
+        // // --- Remove unconnected wires and gates ---
+        // // Remove permanent gates without controls
+        // for (gate_net, gate_slot) in gates.iter_slots() {
+        //     if let Some(gate) = gate_slot
+        //         && gate.controls.is_empty()
+        //     {
+        //         if gate.ty == GateType::Passive {
+        //             if let Some(&wire_net) = gate.wires.first() {
+        //                 for &net in &gate.wires[1..] {
+        //                     net_aliases.alias(wire_net, net);
+        //                 }
+        //                 net_aliases.alias(gate_net as u32, wire_net);
+        //             } else {
+        //                 net_aliases.alias(gate_net as u32, NET_OFF);
+        //             }
+        //         }
+        //         *gate_slot = None;
+        //     }
+        // }
 
         // // Check which wires are connected to which nets
         // let mut used_wires = vec![false; net_aliases.len() as usize];

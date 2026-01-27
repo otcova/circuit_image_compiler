@@ -20,32 +20,39 @@ out vec4 out_color;
 
 uint net_at(vec2 pixel) {
     vec2 tex_size = vec2(textureSize(tex_nets, 0));
-    if (pixel.x < 0 || pixel.x >= 1. || pixel.y < 0 || pixel.y >= 1.)
+    ivec2 p = ivec2(pixel);
+    if (p.x < 0 || p.x >= tex_size.x || p.y < 0 || p.y >= tex_size.y)
         return 0u;
-    return texelFetch(tex_nets, ivec2(pixel * tex_size), 0).r;
+    return texelFetch(tex_nets, ivec2(p), 0).r;
 }
 
 void main() {
     out_color = vec4(0., 0., 0., 1.);
 
-    float stroke_width = 1.; // (1. + texel_size / 4.); 
-    stroke_width = round(max(1., texel_size / 4.));
-    vec2 d = pixel_size * stroke_width; // distance to neighbour
-
     ivec2 tex_size = textureSize(tex_nets, 0);
     vec2 tex_size_f = vec2(tex_size);
 
-    uint net = net_at(uv);
+    vec2 texel_coord = uv * tex_size_f;
+
+    float border_pixels = round(max(1., texel_size / 4.));
+    // Border width in texel units
+    vec2 border_size = pixel_size * border_pixels * tex_size_f;
+
+
+    uint net = net_at(texel_coord);
 
     // Check 8 Neighbours
-    uint n0 = net_at((uv + vec2(-d.x, -d.y)));
-    uint n1 = net_at((uv + vec2( 0,   -d.y)));
-    uint n2 = net_at((uv + vec2( d.x, -d.y)));
-    uint n3 = net_at((uv + vec2(-d.x,  0)));
-    uint n4 = net_at((uv + vec2( d.x,  0)));
-    uint n5 = net_at((uv + vec2(-d.x,  d.y)));
-    uint n6 = net_at((uv + vec2( 0,    d.y)));
-    uint n7 = net_at((uv + vec2( d.x,  d.y)));
+    // | 0 | 1 | 2 |
+    // | 3 |net| 4 |
+    // | 5 | 6 | 7 |
+    uint n0 = net_at(texel_coord + vec2(-border_size.x, -border_size.y)); // tl
+    uint n1 = net_at(texel_coord + vec2( 0,             -border_size.y)); // t
+    uint n2 = net_at(texel_coord + vec2( border_size.x, -border_size.y)); // tr
+    uint n3 = net_at(texel_coord + vec2(-border_size.x,  0));             // l
+    uint n4 = net_at(texel_coord + vec2( border_size.x,  0));             // r
+    uint n5 = net_at(texel_coord + vec2(-border_size.x,  border_size.y)); // lb
+    uint n6 = net_at(texel_coord + vec2( 0,              border_size.y)); // b
+    uint n7 = net_at(texel_coord + vec2( border_size.x,  border_size.y)); // rb
 
     uint net_state = texelFetch(tex_net_state, int(net)).r;
     uint inp_state = texelFetch(tex_net_state, int(net + net_count)).r;
@@ -64,7 +71,7 @@ void main() {
     {
         uint selected_inp_state = texelFetch(tex_net_state, int(selected_net + net_count)).r;
         if (selected_inp_state == 0u || selected_net == 1u) out_color.rgb = vec3(1.);
-        else out_color.rgb = power_color + vec3(0.5);
+        else out_color.rgb = power_color + vec3(0.3);
         return;
     }
 
@@ -74,17 +81,46 @@ void main() {
         return;
     }
 
-    // Draw gate is triggered
+    // Draw gate triggered border
     if (net > wire_count && is_border) {
         uint idx = (net - wire_count) + net_count * 2u;
         uint gate_toggled = texelFetch(tex_net_state, int(idx)).r;
-        if (gate_toggled != 0u) {
-            if (out_color.rgb == active_color)
-                // out_color.rgb = passive_color;
-                out_color.rgb = mix(active_color, passive_color, 0.7);
-            else 
-                // out_color.rgb = active_color;
-                out_color.rgb = mix(passive_color, active_color, 0.7);
+        if (gate_toggled == 0u) {
+            vec2 inner = fract(texel_coord);
+            bool border_t = fract(inner.y) < border_size.y;
+            bool border_b = fract(inner.y) > 1. - border_size.y;
+            bool border_l = fract(inner.x) < border_size.x;
+            bool border_r = fract(inner.x) > 1. - border_size.x;
+
+            if ((!border_l && !border_r) || (border_l && n3 == net) || (border_r && n4 == net)) {
+                if (border_t) {
+                    if (n1 != net && n1 > wire_count && texelFetch(tex_net_state, int(n1)).r != 0u)
+                        gate_toggled = 1u;
+                } else if (fract(texel_coord.y) > 1. - border_size.y) {
+                    if (n6 != net && n6 > wire_count && texelFetch(tex_net_state, int(n6)).r != 0u)
+                        gate_toggled = 1u;
+                }
+            }
+
+            if ((!border_t && !border_b) || (border_t && n1 == net) || (border_b && n6 == net)) {
+                if (fract(texel_coord.x) < border_size.x) {
+                    if (n3 != net && n3 > wire_count && texelFetch(tex_net_state, int(n3)).r != 0u)
+                        gate_toggled = 1u;
+                } else if (fract(texel_coord.x) > 1. - border_size.x) {
+                    if (n4 != net && n4 > wire_count && texelFetch(tex_net_state, int(n4)).r != 0u)
+                        gate_toggled = 1u;
+                }
+            }
+
+            if (gate_toggled == 0u) {
+                // Draw border
+                if (out_color.rgb == active_color)
+                    // out_color.rgb = passive_color;
+                    out_color.rgb = mix(active_color, passive_color, 0.7);
+                else 
+                    // out_color.rgb = active_color;
+                    out_color.rgb = mix(passive_color, active_color, 0.7);
+            }
         }
     }
 
