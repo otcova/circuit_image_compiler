@@ -90,7 +90,15 @@ pub struct CircuitImage {
     /// The net of each pixel of the image.
     image_nets: Vec<u32>,
 
+    /// For each pixel, the horizontal and vertical arrows that where used
+    /// to decide wire crossings.
     arrows: Vec<(u32, u32)>,
+
+    /// Input Wire Nets
+    inputs: Vec<u32>,
+
+    /// Output Wire Nets
+    outputs: Vec<u32>,
 
     /// Each wire stores the index of all the `self.gates` connected to it.
     wires: Vec<SmallVec<u32, 4>>,
@@ -146,6 +154,9 @@ impl CircuitImage {
             colors: ImageBuffer::from_pixel(0, 0, Rgb([0, 0, 0])),
             image_nets: Vec::new(),
             arrows: Vec::new(),
+
+            inputs: Vec::new(),
+            outputs: Vec::new(),
 
             wires: Vec::new(),
             gates: Vec::new(),
@@ -315,6 +326,9 @@ impl CircuitImage {
             colors,
             image_nets: vec![NET_OFF; width as usize * height as usize],
             arrows: vec![(0, 0); width as usize * height as usize],
+
+            inputs: Vec::new(),
+            outputs: Vec::new(),
 
             power_color,
             active_gate_color,
@@ -1217,7 +1231,41 @@ impl CircuitImage {
             }
         }
 
+        // Get Inputs (Scanning left pixels)
+        let mut prev_input = None;
+        for y in 0..height {
+            if let Pixel::Wire { net, .. } = circuit.pixel(0, y) {
+                if prev_input != Some(net) {
+                    prev_input = Some(net);
+                    circuit.inputs.push(net);
+                }
+            } else {
+                prev_input = None;
+            }
+        }
+
+        // Get Outputs (Scanning right pixels)
+        let mut prev_output = None;
+        for y in 0..height {
+            if let Pixel::Wire { net, .. } = circuit.pixel(width - 1, y) {
+                if prev_output != Some(net) {
+                    prev_output = Some(net);
+                    circuit.outputs.push(net);
+                }
+            } else {
+                prev_output = None;
+            }
+        }
+
         circuit
+    }
+
+    pub fn inputs(&self) -> &[u32] {
+        &self.inputs
+    }
+
+    pub fn outputs(&self) -> &[u32] {
+        &self.outputs
     }
 
     pub fn gate_count(&self) -> u32 {

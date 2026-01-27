@@ -1,4 +1,3 @@
-use core::f32;
 use eframe::{
     egui::{
         self, CollapsingHeader, Key, KeyboardShortcut, Modifiers, PaintCallback, PointerButton,
@@ -441,6 +440,11 @@ impl MyEguiApp {
         ui.strong(format!("size: {:?} x {:?}", image.width(), image.height()));
         ui.strong(format!("wires: {:?}", image.wire_count() - 2));
         ui.strong(format!("gates: {:?}", image.gate_count()));
+
+        let inp = image.inputs();
+        let out = image.outputs();
+        ui.strong(format!("{} inputs: {:?}", inp.len(), inp));
+        ui.strong(format!("{} outputs: {:?}", out.len(), out));
     }
 
     fn choose_engine(&mut self, engine_name: &'static str) {

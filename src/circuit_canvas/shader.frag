@@ -81,54 +81,63 @@ void main() {
         return;
     }
 
-    // Draw gate triggered border
-    if (net > wire_count && is_border) {
-        uint idx = (net - wire_count) + net_count * 2u;
-        uint gate_toggled = texelFetch(tex_net_state, int(idx)).r;
-        if (gate_toggled == 0u) {
-            vec2 inner = fract(texel_coord);
-            bool border_t = fract(inner.y) < border_size.y;
-            bool border_b = fract(inner.y) > 1. - border_size.y;
-            bool border_l = fract(inner.x) < border_size.x;
-            bool border_r = fract(inner.x) > 1. - border_size.x;
-
-            if ((!border_l && !border_r) || (border_l && n3 == net) || (border_r && n4 == net)) {
-                if (border_t) {
-                    if (n1 != net && n1 > wire_count && texelFetch(tex_net_state, int(n1)).r != 0u)
-                        gate_toggled = 1u;
-                } else if (fract(texel_coord.y) > 1. - border_size.y) {
-                    if (n6 != net && n6 > wire_count && texelFetch(tex_net_state, int(n6)).r != 0u)
-                        gate_toggled = 1u;
-                }
-            }
-
-            if ((!border_t && !border_b) || (border_t && n1 == net) || (border_b && n6 == net)) {
-                if (fract(texel_coord.x) < border_size.x) {
-                    if (n3 != net && n3 > wire_count && texelFetch(tex_net_state, int(n3)).r != 0u)
-                        gate_toggled = 1u;
-                } else if (fract(texel_coord.x) > 1. - border_size.x) {
-                    if (n4 != net && n4 > wire_count && texelFetch(tex_net_state, int(n4)).r != 0u)
-                        gate_toggled = 1u;
-                }
-            }
-
+    // Draw Gates
+    if (net > wire_count) {
+        // Draw gate triggered border
+        if (is_border) {
+            uint idx = (net - wire_count) + net_count * 2u;
+            uint gate_toggled = texelFetch(tex_net_state, int(idx)).r;
             if (gate_toggled == 0u) {
-                // Draw border
-                if (out_color.rgb == active_color)
-                    // out_color.rgb = passive_color;
-                    out_color.rgb = mix(active_color, passive_color, 0.7);
-                else 
-                    // out_color.rgb = active_color;
-                    out_color.rgb = mix(passive_color, active_color, 0.7);
+                vec2 inner = fract(texel_coord);
+                bool border_t = fract(inner.y) < border_size.y;
+                bool border_b = fract(inner.y) > 1. - border_size.y;
+                bool border_l = fract(inner.x) < border_size.x;
+                bool border_r = fract(inner.x) > 1. - border_size.x;
+
+                if ((!border_l && !border_r) || (border_l && n3 == net) || (border_r && n4 == net)) {
+                    if (border_t) {
+                        if (n1 != net && n1 > wire_count && texelFetch(tex_net_state, int(n1)).r != 0u)
+                            gate_toggled = 1u;
+                    } else if (fract(texel_coord.y) > 1. - border_size.y) {
+                        if (n6 != net && n6 > wire_count && texelFetch(tex_net_state, int(n6)).r != 0u)
+                            gate_toggled = 1u;
+                    }
+                }
+
+                if ((!border_t && !border_b) || (border_t && n1 == net) || (border_b && n6 == net)) {
+                    if (fract(texel_coord.x) < border_size.x) {
+                        if (n3 != net && n3 > wire_count && texelFetch(tex_net_state, int(n3)).r != 0u)
+                            gate_toggled = 1u;
+                    } else if (fract(texel_coord.x) > 1. - border_size.x) {
+                        if (n4 != net && n4 > wire_count && texelFetch(tex_net_state, int(n4)).r != 0u)
+                            gate_toggled = 1u;
+                    }
+                }
+
+                if (gate_toggled == 0u) {
+                    // Draw border
+                    if (out_color.rgb == active_color)
+                        // out_color.rgb = passive_color;
+                        out_color.rgb = mix(active_color, passive_color, 0.7);
+                    else 
+                        // out_color.rgb = active_color;
+                        out_color.rgb = mix(passive_color, active_color, 0.7);
+                }
             }
         }
-    }
-
-    // Draw on/off nets
-    if (net_state == 0u) {
-        out_color.rgb = out_color.rgb / 1.5;
+        // Draw inner gate
+        if (net_state == 0u) {
+            out_color.rgb = out_color.rgb / 1.5;
+        } else {
+            out_color.rgb = out_color.rgb * 1.5;
+        }
     } else {
-        out_color.rgb = out_color.rgb * 1.5;
+        // Draw on/off wires
+        if (net_state == 0u) {
+            out_color.rgb = out_color.rgb / 1.5;
+        } else {
+            out_color.rgb = out_color.rgb * 1.5;
+        }
     }
 
 }
