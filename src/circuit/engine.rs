@@ -34,10 +34,10 @@ pub trait CircuitEngine: Send {
         self.clone_dyn()
     }
 
-    /// Use step_n for faster iteration
+    /// Use tick_n for faster iteration
     fn tick(&mut self, state: &mut CircuitState);
 
-    /// This may be faster than step_n (if n > 1) since engines may:
+    /// This could be faster than `self.tick()` (if n > 1) since engines may:
     /// - Apply optimizations that allow for jumping multiple steps at once.
     /// - Need to transform the state into
     fn tick_n(&mut self, state: &mut CircuitState, n: u64) {

@@ -14,6 +14,8 @@ egui-file-dialog = "0.12" # Fallback file picker
 env_logger = "0.11" # Print debug info to terminal
 tokio = { version = "1.49", features = ["rt-multi-thread", "sync"] } # Async thread pool
 cpu-time = "1.0" # Instead of total time, measure CPU (more stable for our quick benchmarks)
+rand = "0.9" # Random number generators
+i256 = "0.2" # u256 support (rust only goes up to u128)
 
 # # Compiler Backends
 # inkwell = { version = "0.8", features = ["llvm20-1"], optional = true }

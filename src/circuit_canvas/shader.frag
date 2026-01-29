@@ -19,11 +19,14 @@ in vec2 uv;
 out vec4 out_color;
 
 uint net_at(vec2 pixel) {
-    vec2 tex_size = vec2(textureSize(tex_nets, 0));
-    ivec2 p = ivec2(pixel);
-    if (p.x < 0 || p.x >= tex_size.x || p.y < 0 || p.y >= tex_size.y)
+    if (pixel.x < 0 || pixel.y < 0)
         return 0u;
-    return texelFetch(tex_nets, ivec2(p), 0).r;
+
+    ivec2 tex_size = textureSize(tex_nets, 0);
+    ivec2 p = ivec2(pixel);
+    if (p.x >= tex_size.x || p.y >= tex_size.y)
+        return 0u;
+    return texelFetch(tex_nets, p, 0).r;
 }
 
 void main() {

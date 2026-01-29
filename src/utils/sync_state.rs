@@ -8,7 +8,7 @@ use std::{
 ///
 /// This design guarantees data-race freedom and bounded lock hold times,
 /// while allowing explicit, intentional blocking when required.
-pub struct SyncState<S> {
+pub struct SyncState<S: Clone> {
     shared: Mutex<Shared<S>>,
     cv: Condvar,
 }
@@ -23,16 +23,24 @@ struct Shared<S> {
 }
 
 /// Local copy of the simulation state held by the runner.
+#[derive(Clone)]
 pub struct Local<S> {
     state: S,
     version: u64,
+
+    // Did local state mutate since last synchronization
+    mutated: bool,
 }
 
-impl<S> SyncState<S> {
-    /// Create a new `SyncState` initialized with the given state.
-    ///
-    /// The initial version is `1`. The threads should initialize its new local state
-    /// (which start at version `0`) by pulling from the shared state once.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SyncOutcome {
+    Published,
+    Overwritten,
+    NoChanges,
+}
+
+#[allow(dead_code)]
+impl<S: Clone> SyncState<S> {
     pub fn new(initial: S) -> Self {
         Self {
             shared: Mutex::new(Shared {
@@ -43,103 +51,115 @@ impl<S> SyncState<S> {
         }
     }
 
-    /// Read the latest shared state under a short-lived lock.
-    ///
-    /// Intended for a quick copy or inspection of the state.
-    ///
-    /// The mutex is held only for the duration of the closure.
-    pub fn get<R>(&self, f: impl FnOnce(&S) -> R) -> R {
-        let guard = self.shared.lock().unwrap();
-        f(&guard.state)
-    }
-
-    /// Lock the shared state exclusively and mutate it.
-    ///
-    /// This operation:
-    /// - blocks the shared state while the lock is held
-    /// - increments the shared version
-    /// - notifies all waiters on the condition variable
-    ///
-    /// Intended for:
-    /// - holding the state without letting others use it/sync
-    /// - operations that do not interleave with the other threads progress
-    pub fn overwrite<R>(&self, f: impl FnOnce(&mut S) -> R) -> R {
-        let mut guard = self.shared.lock().unwrap();
-        let result = f(&mut guard.state);
-        guard.version += 1;
+    pub fn mut_shared<R>(&self, mut f: impl FnMut(&mut S) -> R) -> R {
+        let mut shared = self.shared.lock().unwrap_or_else(|p| p.into_inner());
+        let result = f(&mut shared.state);
+        shared.version += 1;
         self.cv.notify_all();
         result
     }
-}
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum SyncOutcome {
-    Published,
-    Overwritten,
-}
+    pub fn publish_new_local(&self, state: S) -> Local<S> {
+        let mut shared = self.shared.lock().unwrap_or_else(|p| p.into_inner());
+        shared.publish_state(state, &self.cv);
+        shared.new_local()
+    }
 
-#[allow(dead_code)]
-impl<S: Clone> SyncState<S> {
-    /// Block the current thread while `cond(&state)` evaluates to `true`.
-    ///
-    /// This method:
-    /// - does not consume CPU while waiting
-    /// - handles spurious wakeups correctly
-    /// - reevaluates the condition under the mutex
-    ///
-    /// Once the condition becomes false, local and shared states are synced.
-    ///
-    /// Intended to pause a thread while configuration says so.
+    pub fn new_local(&self) -> Local<S> {
+        let shared = self.shared.lock().unwrap_or_else(|p| p.into_inner());
+        shared.new_local()
+    }
+
+    pub fn publish(&self, local: &mut Local<S>) -> SyncOutcome {
+        let mut shared = self.shared.lock().unwrap_or_else(|p| p.into_inner());
+        shared.publish(local, &self.cv)
+    }
+
+    pub fn overwrite_local(&self, local: &mut Local<S>) -> SyncOutcome {
+        let mut shared = self.shared.lock().unwrap_or_else(|p| p.into_inner());
+        shared.overwrite_local(local)
+    }
+
     pub fn wait_while(
         &self,
         local: &mut Local<S>,
         mut cond: impl FnMut(&S) -> bool,
     ) -> SyncOutcome {
-        let mut guard = self.shared.lock().unwrap();
-        while cond(&guard.state) {
-            guard = self.cv.wait(guard).unwrap();
-        }
-        self.sync(&mut *guard, local)
-    }
+        let mut shared = self.shared.lock().unwrap_or_else(|p| p.into_inner());
 
-    /// Synchronize a thread local state with the shared state.
-    ///
-    /// # Semantics
-    ///
-    /// - If `local.version == shared.version`:
-    ///   - The local state is copied into the shared state and shared version is incremented
-    /// - Otherwise:
-    ///   - The shared state is copied into the local state
-    ///
-    /// In both cases, the local version is updated to match the shared version.
-    ///
-    /// All state and version updates happen while holding the mutex.
-    pub fn sync_state(&self, local: &mut Local<S>) -> SyncOutcome {
-        let mut shared = self.shared.lock().unwrap();
-        self.sync(&mut *shared, local)
-    }
-
-    fn sync(&self, shared: &mut Shared<S>, local: &mut Local<S>) -> SyncOutcome {
         if local.version == shared.version {
-            // Runner publishes
-            shared.state.clone_from(&local.state);
-            shared.version += 1;
-            local.version = shared.version;
-            self.cv.notify_all();
+            shared.publish(local, &self.cv);
+        }
+
+        while cond(&shared.state) {
+            shared = self.cv.wait(shared).unwrap_or_else(|p| p.into_inner());
+        }
+
+        if local.version == shared.version {
+            // "overwrite_shared" already done
             SyncOutcome::Published
         } else {
-            // UI overwrote shared state
-            local.state.clone_from(&shared.state);
-            local.version = shared.version;
+            shared.overwrite_local(local);
             SyncOutcome::Overwritten
+        }
+    }
+
+    pub fn sync(&self, local: &mut Local<S>) -> SyncOutcome {
+        match self.shared.lock() {
+            Ok(mut shared) => shared.sync(local, &self.cv),
+            Err(mut poisoned) => {
+                poisoned.get_mut().publish(local, &self.cv);
+                SyncOutcome::Overwritten
+            }
         }
     }
 }
 
-impl<S> Local<S> {
-    // Initializes a local state at version `0`
-    pub fn new(state: S) -> Self {
-        Self { state, version: 0 }
+impl<S: Clone> Shared<S> {
+    fn sync(&mut self, local: &mut Local<S>, cv: &Condvar) -> SyncOutcome {
+        if local.version == self.version {
+            self.publish(local, cv)
+        } else {
+            self.overwrite_local(local)
+        }
+    }
+
+    fn publish(&mut self, local: &mut Local<S>, cv: &Condvar) -> SyncOutcome {
+        if local.version == self.version && !local.mutated {
+            return SyncOutcome::NoChanges;
+        }
+
+        self.state.clone_from(&local.state);
+        self.version = self.version.wrapping_add(1);
+        local.version = self.version;
+        local.mutated = false;
+        cv.notify_all();
+        SyncOutcome::Published
+    }
+
+    fn overwrite_local(&mut self, local: &mut Local<S>) -> SyncOutcome {
+        if local.version == self.version && !local.mutated {
+            return SyncOutcome::NoChanges;
+        }
+
+        local.state.clone_from(&self.state);
+        local.version = self.version;
+        local.mutated = false;
+        SyncOutcome::Overwritten
+    }
+
+    fn publish_state(&mut self, state: S, cv: &Condvar) {
+        self.state = state;
+        self.version = self.version.wrapping_add(1);
+        cv.notify_all();
+    }
+
+    fn new_local(&self) -> Local<S> {
+        Local {
+            state: self.state.clone(),
+            version: self.version,
+            mutated: false,
+        }
     }
 }
 
@@ -152,6 +172,7 @@ impl<S> Deref for Local<S> {
 
 impl<S> DerefMut for Local<S> {
     fn deref_mut(&mut self) -> &mut S {
+        self.mutated = true;
         &mut self.state
     }
 }

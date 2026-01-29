@@ -4,11 +4,13 @@ use std::sync::Arc;
 
 pub use circuit_runner::*;
 pub use engine::*;
+pub use environment::*;
 
 use crate::utils::{dense_map::DenseMap, union_find::UnionFind};
 
 mod circuit_runner;
 mod engine;
+mod environment;
 
 // Permanent unconditional off
 pub const NET_OFF: u32 = 0;
@@ -621,12 +623,15 @@ impl CircuitImage {
 
         for ((x, y), (dx, dy)) in arrows_tips {
             let (arrow_x, arrow_y) = circuit.get_arrows(x, y);
-            if dx != 0 && arrow_y != 0 {
+            if (dx != 0 && arrow_x <= arrow_y) || (dy != 0 && arrow_x >= arrow_y) {
                 continue;
             }
-            if dy != 0 && arrow_x != 0 {
-                continue;
-            }
+            // if dx != 0 && arrow_y != 0 {
+            //     continue;
+            // }
+            // if dy != 0 && arrow_x != 0 {
+            //     continue;
+            // }
 
             let arrow_net = circuit.net_at(x, y);
             let arrow_color = circuit.color(x, y);
@@ -1109,24 +1114,20 @@ impl CircuitImage {
         // }
 
         // // --- Remove unconnected wires and gates ---
-        // // Remove permanent gates without controls
-        // for (gate_net, gate_slot) in gates.iter_slots() {
-        //     if let Some(gate) = gate_slot
-        //         && gate.controls.is_empty()
-        //     {
-        //         if gate.ty == GateType::Passive {
-        //             if let Some(&wire_net) = gate.wires.first() {
-        //                 for &net in &gate.wires[1..] {
-        //                     net_aliases.alias(wire_net, net);
-        //                 }
-        //                 net_aliases.alias(gate_net as u32, wire_net);
-        //             } else {
-        //                 net_aliases.alias(gate_net as u32, NET_OFF);
-        //             }
-        //         }
-        //         *gate_slot = None;
-        //     }
-        // }
+        // Remove permanent gates without controls
+        for (gate_net, gate_slot) in gates.iter_slots() {
+            if let Some(gate) = gate_slot
+                && gate.controls.is_empty()
+                && gate.ty == GateType::Active
+                && let Some(&wire_net) = gate.wires.first()
+            {
+                for &net in &gate.wires[1..] {
+                    net_aliases.alias(wire_net, net);
+                }
+                net_aliases.alias(gate_net as u32, wire_net);
+                *gate_slot = None;
+            }
+        }
 
         // // Check which wires are connected to which nets
         // let mut used_wires = vec![false; net_aliases.len() as usize];
@@ -1308,6 +1309,25 @@ pub struct CircuitState {
     pub tick: u64,
 }
 
+impl CircuitStateNets {
+    pub fn set_inp_u128(&mut self, nets: &[u32], mut value: u128) {
+        for &net in nets {
+            self.inputs_mut()[net as usize] = (value & 1) == 1;
+            value >>= 1;
+        }
+    }
+
+    pub fn u128(&self, nets: &[u32]) -> u128 {
+        let mut value = 0;
+        for (idx, &net) in nets.iter().enumerate() {
+            if self.get()[net as usize] {
+                value |= 1 << idx;
+            }
+        }
+        value
+    }
+}
+
 impl CircuitState {
     pub fn new(circuit: Arc<CircuitImage>) -> Self {
         Self {
@@ -1315,6 +1335,37 @@ impl CircuitState {
             nets: CircuitStateNets::new(&circuit),
             image: circuit,
         }
+    }
+
+    pub fn reset(&mut self) {
+        self.nets.reset();
+        self.tick = 0;
+    }
+
+    pub fn get_out_bool(&self, idx: u32) -> bool {
+        let net = self.image.outputs[idx as usize];
+        self.nets.get()[net as usize]
+    }
+
+    #[allow(dead_code)]
+    pub fn get_inp_bool(&self, idx: u32) -> bool {
+        let net = self.image.inputs[idx as usize];
+        self.nets.get()[net as usize]
+    }
+
+    pub fn get_inp_u128(&self, range: std::ops::Range<u32>) -> u128 {
+        let nets = &self.image.inputs[range.start as usize..range.end as usize];
+        self.nets.u128(nets)
+    }
+
+    pub fn set_inp_u128(&mut self, range: std::ops::Range<u32>, value: u128) {
+        let nets = &self.image.inputs[range.start as usize..range.end as usize];
+        self.nets.set_inp_u128(nets, value)
+    }
+
+    pub fn get_out_u128(&self, range: std::ops::Range<u32>) -> u128 {
+        let nets = &self.image.outputs[range.start as usize..range.end as usize];
+        self.nets.u128(nets)
     }
 }
 
