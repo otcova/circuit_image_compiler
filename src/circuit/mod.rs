@@ -37,6 +37,7 @@ impl GateType {
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Pixel {
     Insulator,
+    // TODO: Make Power a wire with net=NET_ON
     Power,
     Gate { ty: GateType, net: u32 },
     Wire { color: Rgb<u8>, net: u32 },
@@ -52,8 +53,8 @@ impl Pixel {
         }
     }
 
-    pub fn is_wire(self) -> bool {
-        matches!(self, Pixel::Wire { .. })
+    pub fn is_wire_or_power(self) -> bool {
+        matches!(self, Pixel::Wire { .. }) || matches!(self, Pixel::Power)
     }
 }
 
@@ -469,9 +470,10 @@ impl CircuitImage {
                         match circuit.pixel(nx, ny) {
                             Pixel::Insulator => continue,
                             Pixel::Power => {
-                                if let Pixel::Wire { .. } = current_pixel {
-                                    net_aliases.alias(current_net, NET_ON);
-                                }
+                                // This makes the power wire sticky to other wires
+                                // if let Pixel::Wire { .. } = current_pixel {
+                                //     net_aliases.alias(current_net, NET_ON);
+                                // }
                                 continue;
                             }
                             Pixel::Gate { net: gate_net, .. } => {
@@ -565,11 +567,11 @@ impl CircuitImage {
                                 circuit.get_arrows_mut(arrow_x, y).0 = arrow_len;
                             }
                         }
-                        if min_x > 0 && circuit.pixel(min_x - 1, y).is_wire() {
+                        if min_x > 0 && circuit.pixel(min_x - 1, y).is_wire_or_power() {
                             arrows_tips.push(((min_x, y), (-1, 0)));
                         }
 
-                        if max_x + 1 < width && circuit.pixel(max_x + 1, y).is_wire() {
+                        if max_x + 1 < width && circuit.pixel(max_x + 1, y).is_wire_or_power() {
                             arrows_tips.push(((max_x, y), (1, 0)));
                         }
                     }
@@ -609,11 +611,11 @@ impl CircuitImage {
                             }
                         }
 
-                        if min_y > 0 && circuit.pixel(x, min_y - 1).is_wire() {
+                        if min_y > 0 && circuit.pixel(x, min_y - 1).is_wire_or_power() {
                             arrows_tips.push(((x, min_y), (0, -1)));
                         }
 
-                        if max_y + 1 < height && circuit.pixel(x, max_y + 1).is_wire() {
+                        if max_y + 1 < height && circuit.pixel(x, max_y + 1).is_wire_or_power() {
                             arrows_tips.push(((x, max_y), (0, 1)));
                         }
                     }

@@ -86,7 +86,7 @@ impl CircuitEnvAdderConfig {
             } else {
                 bits_inp_a
             },
-            max_operations: 10,
+            max_operations: 100,
         }
     }
 

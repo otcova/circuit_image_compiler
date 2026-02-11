@@ -73,7 +73,7 @@ impl CircuitEnvCollatzConfig {
             seed: 0,
             bits_inp,
             bits_out,
-            max_operations: 10,
+            max_operations: 100,
         }
     }
 
