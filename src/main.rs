@@ -896,13 +896,6 @@ impl MyEguiApp {
                         );
                         ui.colored_label(Color32::RED, format!(" - Got: {a} + {b} = {got}"));
                     }
-                    Some(AdderHalt::UnexpectedOut) => {
-                        ui.colored_label(Color32::RED, "Unexpected output");
-                        ui.colored_label(
-                            Color32::RED,
-                            "The circuit produced a result without enqued operations",
-                        );
-                    }
                     None => {}
                 }
             }
@@ -1003,13 +996,6 @@ impl MyEguiApp {
                             format!(" - Expected: {input} -> {expected}"),
                         );
                         ui.colored_label(Color32::RED, format!(" - Got: {input} -> {got}"));
-                    }
-                    Some(CollatzHalt::UnexpectedOut) => {
-                        ui.colored_label(Color32::RED, "Unexpected output");
-                        ui.colored_label(
-                            Color32::RED,
-                            "The circuit produced a result without enqued operations",
-                        );
                     }
                     None => {}
                 }

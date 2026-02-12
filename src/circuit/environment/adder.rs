@@ -69,7 +69,6 @@ pub enum AdderHalt {
         expected: u128,
         got: u128,
     },
-    UnexpectedOut,
 }
 
 impl CircuitEnvAdderConfig {
@@ -86,7 +85,7 @@ impl CircuitEnvAdderConfig {
             } else {
                 bits_inp_a
             },
-            max_operations: 100,
+            max_operations: 1000,
         }
     }
 
@@ -199,13 +198,11 @@ impl CircuitEnvAdder {
                     }
                 }
             } else {
-                // We did not expect output from circuit
-                self.halt = Some(AdderHalt::UnexpectedOut);
-                return;
+                // We did not expect output from circuit. We ignore the next signal.
             }
         }
 
-        if io.next || self.circuit.tick == 0 {
+        if io.next {
             // Compute new input
             let a = self.rng.random_range(0..=mask_u128(self.config.bits_inp_a));
             let b = self.rng.random_range(0..=mask_u128(self.config.bits_inp_b));

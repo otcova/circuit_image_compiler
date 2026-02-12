@@ -61,7 +61,6 @@ pub enum CollatzHalt {
         expected: u64,
         got: u128,
     },
-    UnexpectedOut,
 }
 
 impl CircuitEnvCollatzConfig {
@@ -73,7 +72,7 @@ impl CircuitEnvCollatzConfig {
             seed: 0,
             bits_inp,
             bits_out,
-            max_operations: 100,
+            max_operations: 1000,
         }
     }
 
@@ -194,13 +193,11 @@ impl CircuitEnvCollatz {
                     }
                 }
             } else {
-                // We did not expect output from circuit
-                self.halt = Some(CollatzHalt::UnexpectedOut);
-                return;
+                // We did not expect output from circuit. We ignore the next signal.
             }
         }
 
-        if io.next || self.circuit.tick == 0 {
+        if io.next {
             // Compute new input
             let input = self.rng.random_range(1..=mask_u128(self.config.bits_inp));
             let steps = collatz_steps(input) & mask_u128(self.config.bits_out) as u64;
