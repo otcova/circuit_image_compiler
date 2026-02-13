@@ -94,7 +94,7 @@ impl<Env: CircuitEnv + Clone> CircuitRunner<Env> {
             while !runtime.exit {
                 // Run ticks and sleep thread for UPDATE_INTERVAL time
                 if !runtime.paused {
-                    // Do at most 256 at a time to not exceed UPDATE_INTERVAL.
+                    // Do at most 256 at a time to not exceed UPDATE_INTERVAL significatively.
                     let max_ticks_per_step = rng.random_range(128_u32..256);
 
                     clock.run_ticks(runtime.tick_interval, |n| {

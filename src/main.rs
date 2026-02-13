@@ -1,7 +1,7 @@
 use eframe::{
     egui::{
-        self, CollapsingHeader, Color32, DragValue, Key, KeyboardShortcut, Modifiers,
-        PaintCallback, PointerButton, RichText, ScrollArea, Sense, Theme, Ui, Vec2,
+        self, CollapsingHeader, Color32, DragValue, Event, Key, Modifiers, PaintCallback,
+        PointerButton, RichText, ScrollArea, Sense, Theme, Ui, Vec2,
     },
     egui_glow,
     glow::{self},
@@ -730,28 +730,36 @@ impl MyEguiApp {
             self.choose_engine(engine_name);
         }
 
-        let shortcut = |ctx: &egui::Context, modifiers: Modifiers, key: Key| {
-            ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(modifiers, key)))
+        let pressed_once = |ctx: &egui::Context, desired_key: Key| {
+            ctx.input(|i| {
+                i.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        Event::Key { key, modifiers: Modifiers::NONE, pressed: true, repeat: false, .. }
+                        if *key == desired_key
+                    )
+                })
+            })
         };
 
         // Restart will clear the circuit, we need to draw buttons before that.
-        let restart = ui.button("Restart ").clicked() || shortcut(ctx, Modifiers::NONE, Key::R);
+        let restart = ui.button("Restart ").clicked() || pressed_once(ctx, Key::R);
 
         if let Some(playground) = &mut self.playground
             && let Some(runner) = playground.runner_mut()
         {
             if ui.button("Step ").clicked()
-                || shortcut(ctx, Modifiers::NONE, Key::ArrowRight)
-                || shortcut(ctx, Modifiers::NONE, Key::S)
+                || ctx.input_mut(|i| i.key_pressed(Key::ArrowRight))
+                || ctx.input_mut(|i| i.key_pressed(Key::S))
             {
                 runner.tick_n(1);
             }
 
             if runner.is_paused() {
-                if ui.button("Play").clicked() || shortcut(ctx, Modifiers::NONE, Key::Space) {
+                if ui.button("Play").clicked() || pressed_once(ctx, Key::Space) {
                     runner.set_paused(false);
                 }
-            } else if ui.button("Stop").clicked() || shortcut(ctx, Modifiers::NONE, Key::Space) {
+            } else if ui.button("Stop").clicked() || pressed_once(ctx, Key::Space) {
                 runner.set_paused(true);
             }
 

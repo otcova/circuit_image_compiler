@@ -87,20 +87,20 @@ impl<S: Clone> SyncState<S> {
     ) -> SyncOutcome {
         let mut shared = self.shared.lock().unwrap_or_else(|p| p.into_inner());
 
-        if local.version == shared.version {
-            shared.publish(local, &self.cv);
-        }
+        let sync_outcome = if local.version == shared.version {
+            Some(shared.publish(local, &self.cv))
+        } else {
+            None
+        };
 
         while cond(&shared.state) {
             shared = self.cv.wait(shared).unwrap_or_else(|p| p.into_inner());
         }
 
-        if local.version == shared.version {
-            // "overwrite_shared" already done
-            SyncOutcome::Published
+        if let Some(outcome) = sync_outcome {
+            outcome
         } else {
-            shared.overwrite_local(local);
-            SyncOutcome::Overwritten
+            shared.overwrite_local(local)
         }
     }
 
