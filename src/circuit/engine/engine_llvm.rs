@@ -75,7 +75,7 @@ impl CircuitEngineLlvm {
             _context: Arc::new((exec_engine, context)),
             jit_step,
             dfs_stack: Default::default(),
-            non_trivial_is_connected: Default::default(),
+            non_trivial_is_connected: vec![false; circuit.non_trivial_gates.len()],
         }
     }
 
@@ -87,7 +87,10 @@ impl CircuitEngineLlvm {
         let nets = state.nets.as_concat_mut();
 
         unsafe {
-            (self.jit_step)(nets.as_mut_ptr() as *mut u8);
+            (self.jit_step)(
+                nets.as_mut_ptr() as *mut u8,
+                self.non_trivial_is_connected.as_mut_ptr() as *mut u8,
+            );
         }
 
         // Done by jit_step
@@ -107,13 +110,11 @@ impl CircuitEngineLlvm {
         //         }
         //     }
         // }
-
-        self.non_trivial_is_connected.clear();
-        for gate in &state.image.non_trivial_gates {
-            let is_toggled = gate.controls.iter().all(|&net| nets[net as usize]);
-            let is_connected = gate.ty.connects_wires(is_toggled);
-            self.non_trivial_is_connected.push(is_connected);
-        }
+        // for (idx, gate) in state.image.non_trivial_gates.iter().enumerate() {
+        //     let is_toggled = gate.controls.iter().all(|&net| nets[net as usize]);
+        //     let is_connected = gate.ty.connects_wires(is_toggled);
+        //     self.non_trivial_is_connected[idx] = is_connected;
+        // }
 
         self.dfs_stack.clear();
         for root_wire in NET_ON..state.image.wire_count() {
@@ -149,7 +150,7 @@ impl CircuitEngineLlvm {
 ///
 /// Calling this is innately `unsafe` because there's no guarantee it doesn't
 /// do `unsafe` operations internally.
-type StepFunc = unsafe extern "C" fn(*mut u8);
+type StepFunc = unsafe extern "C" fn(*mut u8, *mut u8);
 
 struct CodeGen<'ctx> {
     context: &'ctx Context,
@@ -168,13 +169,20 @@ impl<'ctx> CodeGen<'ctx> {
         // let const_false = i8_type.const_zero();
         let const_true = i8_type.const_int(1, false);
 
-        let fn_type = void_type.fn_type(&[ptr_type.into()], false);
+        let fn_type = void_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
         let function = self.module.add_function("step", fn_type, None);
         let basic_block = self.context.append_basic_block(function, "entry");
 
         self.builder.position_at_end(basic_block);
 
         let nets = function.get_nth_param(0)?.into_pointer_value();
+        let connected = function.get_nth_param(1)?.into_pointer_value();
+
+        let set_connected = |idx: u32, value: IntValue<'ctx>| {
+            let offset = i32_type.const_int(idx as u64, false);
+            let ptr = unsafe { connected.const_in_bounds_gep(i8_type, &[offset]) };
+            self.builder.build_store(ptr, value).unwrap();
+        };
 
         let get_net_ptr = |net: u32| {
             let offset = i32_type.const_int(net as u64, false);
@@ -231,6 +239,24 @@ impl<'ctx> CodeGen<'ctx> {
                     .unwrap();
                 set_net(net, val);
             }
+        }
+
+        // Compute the non trivial gates connected states
+        for (idx, gate) in circuit.non_trivial_gates.iter().enumerate() {
+            let mut is_toggled = const_true;
+
+            for &control in &gate.controls {
+                let val = get_net(control);
+                is_toggled = self.builder.build_and(is_toggled, val, "").unwrap();
+            }
+
+            let is_connected = if gate.ty == GateType::Active {
+                is_toggled
+            } else {
+                self.builder.build_xor(is_toggled, const_true, "").unwrap()
+            };
+
+            set_connected(idx as u32, is_connected);
         }
 
         self.builder.build_return(None).unwrap();
