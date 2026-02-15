@@ -5,20 +5,28 @@ use std::{
 
 use cpu_time::ProcessTime;
 
-#[derive(Clone, Copy)]
-enum FallbackInstant {
-    Cpu(ProcessTime),
-    Global(Instant),
+struct FallbackInstant {
+    global: Instant,
+    cpu: Option<ProcessTime>,
 }
 
 impl FallbackInstant {
     pub fn now() -> Self {
-        ProcessTime::try_now().map_or_else(|_| Self::Global(Instant::now()), Self::Cpu)
+        Self {
+            global: Instant::now(),
+            cpu: ProcessTime::try_now().ok(),
+        }
     }
-    pub fn elapsed(self) -> Option<f64> {
-        match self {
-            Self::Cpu(t) => t.try_elapsed().map(|d| d.as_secs_f64()).ok(),
-            Self::Global(t) => Some(t.elapsed().as_secs_f64()),
+    pub fn elapsed(&self) -> f64 {
+        if let Some(cpu) = &self.cpu
+            && let Ok(cpu_dt) = cpu.try_elapsed()
+        {
+            // CPU time should be at most global time.
+            cpu_dt
+                .as_secs_f64()
+                .min(self.global.elapsed().as_secs_f64())
+        } else {
+            self.global.elapsed().as_secs_f64()
         }
     }
 }
@@ -28,20 +36,16 @@ where
     F: FnMut(&mut I) -> R,
 {
     let mut samples = Vec::new();
-    let bench_start = Instant::now();
+    let bench_start = FallbackInstant::now();
 
     let start = FallbackInstant::now();
     black_box(f(black_box(input)));
-    if let Some(t) = start.elapsed() {
-        samples.push(t);
-    }
+    samples.push(start.elapsed());
 
-    while bench_start.elapsed() < min_time {
+    while bench_start.elapsed() < min_time.as_secs_f64() {
         let start = FallbackInstant::now();
         black_box(f(black_box(input)));
-        if let Some(t) = start.elapsed() {
-            samples.push(t);
-        }
+        samples.push(start.elapsed());
     }
 
     if samples.is_empty() {

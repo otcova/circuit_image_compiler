@@ -81,8 +81,10 @@ impl CircuitEngineLlvm {
 
     /// Given the state of the gates, compute the state of the wires.
     pub fn update_wires(&mut self, state: &mut CircuitState) {
-        state.apply_inputs();
-        let nets = state.nets.get_mut();
+        // Done by jit_compile_step
+        // state.apply_inputs();
+
+        let nets = state.nets.as_concat_mut();
 
         unsafe {
             (self.jit_step)(nets.as_mut_ptr() as *mut u8);
@@ -174,21 +176,29 @@ impl<'ctx> CodeGen<'ctx> {
 
         let nets = function.get_nth_param(0)?.into_pointer_value();
 
-        let get_net = |net: u32| {
+        let get_net_ptr = |net: u32| {
             let offset = i32_type.const_int(net as u64, false);
-            let ptr = unsafe { nets.const_in_bounds_gep(i8_type, &[offset]) };
+            unsafe { nets.const_in_bounds_gep(i8_type, &[offset]) }
+        };
+
+        let get_net = |net: u32| {
             self.builder
-                .build_load(i8_type, ptr, "")
+                .build_load(i8_type, get_net_ptr(net), "")
                 .unwrap()
                 .into_int_value()
         };
 
         let set_net = |net: u32, value: IntValue<'ctx>| {
-            let offset = i32_type.const_int(net as u64, false);
-            let ptr = unsafe { nets.const_in_bounds_gep(i8_type, &[offset]) };
-            self.builder.build_store(ptr, value).unwrap();
+            self.builder.build_store(get_net_ptr(net), value).unwrap();
         };
 
+        // Apply inputs
+        for net_id in 0..circuit.wire_count() {
+            let input_id = circuit.net_count() + net_id;
+            set_net(net_id, get_net(input_id));
+        }
+
+        // Compute buffer gates
         for buffer_gate in &circuit.not_gates {
             let mut toggled = const_true;
 
@@ -203,6 +213,7 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
 
+        // Compute not gates
         for not_gate in &circuit.buffer_gates {
             let mut toggled = const_true;
 

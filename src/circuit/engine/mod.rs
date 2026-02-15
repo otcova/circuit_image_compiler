@@ -78,7 +78,8 @@ impl CircuitStateNets {
         self.0.fill(false);
     }
     pub fn get(&self) -> &[bool] {
-        &self.0[..self.0.len() / 2]
+        let nets = self.0.len() / 2;
+        &self.0[..nets]
     }
     pub fn get_mut(&mut self) -> &mut [bool] {
         let nets = self.0.len() / 2;
@@ -100,6 +101,12 @@ impl CircuitStateNets {
     /// This is basically how its stored internally.
     pub fn as_concat(&self) -> &[bool] {
         &self.0
+    }
+
+    /// Returns the on/off state of nets and inputs in a single slice
+    /// This is basically how its stored internally.
+    pub fn as_concat_mut(&mut self) -> &mut [bool] {
+        &mut self.0
     }
 }
 
