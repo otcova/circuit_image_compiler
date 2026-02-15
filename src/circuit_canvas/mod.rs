@@ -228,13 +228,6 @@ impl CircuitCanvas {
                 bytemuck::cast_slice(nets_and_inputs),
             );
 
-            // TODO: remove this
-            // gl.buffer_data_u8_slice(
-            //     glow::TEXTURE_BUFFER,
-            //     bytemuck::cast_slice(state.nets.as_concat()),
-            //     glow::DYNAMIC_DRAW,
-            // );
-
             gl.buffer_sub_data_u8_slice(
                 glow::TEXTURE_BUFFER,
                 nets_and_inputs.len() as i32,

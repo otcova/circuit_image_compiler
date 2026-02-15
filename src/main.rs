@@ -288,6 +288,7 @@ impl MyEguiApp {
         let mut files = BTreeMap::<_, SmallVec<_, 2>>::new();
         self.current_files.clear();
 
+        // Load images in folder
         for path in fs::read_dir(folder)?
             .flatten()
             .map(|e| e.path())
@@ -296,16 +297,35 @@ impl MyEguiApp {
             if ImageFormat::from_path(&path).is_ok() {
                 let name = path
                     .file_stem()
-                    .map(|s| s.to_string_lossy().into())
-                    .or_else(|| path.file_name().map(|n| n.to_string_lossy().into()))
+                    .map(|s| format!("{}", s.display()))
+                    .or_else(|| path.file_name().map(|n| format!("{}", n.display())))
                     .unwrap_or_else(|| "circuit".into());
 
-                files.entry(name).or_default().push(path);
+                files.entry((0, name)).or_default().push(path);
+            }
+        }
+
+        // Load images in folder/local
+        if let Ok(local_folder) = fs::read_dir(folder.join("local")) {
+            for path in local_folder
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_file())
+            {
+                if ImageFormat::from_path(&path).is_ok() {
+                    let name = path
+                        .file_stem()
+                        .map(|s| format!("local/{}", s.display()))
+                        .or_else(|| path.file_name().map(|n| format!("local/{}", n.display())))
+                        .unwrap_or_else(|| "local/circuit".into());
+
+                    files.entry((1, name)).or_default().push(path);
+                }
             }
         }
 
         // Update current files
-        for (name, mut paths) in files {
+        for ((_, name), mut paths) in files {
             if paths.len() == 1
                 && let Some(path) = paths.pop()
             {
@@ -424,7 +444,7 @@ impl MyEguiApp {
                     let config = CircuitEnvAdderConfig::new(&circuit);
                     let env = CircuitEnvAdder::new(circuit.clone(), config);
                     let mut runner = CircuitRunner::new(env, engine);
-                    runner.runtime.tick_interval = Duration::from_secs_f32(1. / 10.);
+                    runner.runtime.tick_interval = Duration::from_secs_f32(1. / 20.);
                     let runner = Runner::Adder(runner);
                     on_runner_load_tx.send((runner, camera))
                 }
@@ -432,14 +452,14 @@ impl MyEguiApp {
                     let config = CircuitEnvCollatzConfig::new(&circuit);
                     let env = CircuitEnvCollatz::new(circuit.clone(), config);
                     let mut runner = CircuitRunner::new(env, engine);
-                    runner.runtime.tick_interval = Duration::from_secs_f32(1. / 10.);
+                    runner.runtime.tick_interval = Duration::from_secs_f32(1. / 20.);
                     let runner = Runner::Collatz(runner);
                     on_runner_load_tx.send((runner, camera))
                 }
                 _ => {
                     let env = CircuitEnvPlayground::new(circuit.clone());
                     let mut runner = CircuitRunner::new(env, engine);
-                    runner.runtime.tick_interval = Duration::from_secs_f32(1. / 10.);
+                    runner.runtime.tick_interval = Duration::from_secs_f32(1. / 20.);
                     let runner = Runner::Playground(runner);
                     on_runner_load_tx.send((runner, camera))
                 }
@@ -752,6 +772,7 @@ impl MyEguiApp {
                 || ctx.input_mut(|i| i.key_pressed(Key::ArrowRight))
                 || ctx.input_mut(|i| i.key_pressed(Key::S))
             {
+                runner.set_paused(true);
                 runner.tick_n(1);
             }
 

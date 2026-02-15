@@ -1,4 +1,4 @@
 /llvm
 /target
-/circuits/local*.png
+/circuits/local/
 *.png~

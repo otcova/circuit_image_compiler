@@ -17,8 +17,8 @@ cpu-time = "1.0" # Instead of total time, measure CPU (more stable for our quick
 rand = "0.9" # Random number generators
 i256 = "0.2" # u256 support (rust only goes up to u128)
 
-# # Compiler Backends
-# inkwell = { version = "0.8", features = ["llvm20-1"], optional = true }
+# Compiler Backends
+inkwell = { version = "0.8", features = ["llvm20-1"] }
 # cranelift = { version = "0.127", optional = true }
 # cranelift-module = { version = "0.127", optional = true }
 # cranelift-jit = { version = "0.127", optional = true }
@@ -27,12 +27,12 @@ i256 = "0.2" # u256 support (rust only goes up to u128)
 # Use features that are not published in crates-io.
 glow = { git = "https://github.com/grovesNL/glow", rev = "d645b97" }
 
-# [features]
-# default = ["cranelift"]
-#
-# cranelift = ["dep:cranelift", "dep:cranelift-module", "dep:cranelift-jit"]
-# llvm_dyn = ["inkwell/llvm20-1-force-dynamic"]
-# llvm = ["inkwell/llvm20-1-force-static"]
+[features]
+# # default = ["cranelift"]
+# #
+# # cranelift = ["dep:cranelift", "dep:cranelift-module", "dep:cranelift-jit"]
+llvm_dyn = ["inkwell/llvm20-1-force-dynamic"]
+llvm_static = ["inkwell/llvm20-1-force-static"]
 
 [profile.dev]
 opt-level = 1

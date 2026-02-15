@@ -1,14 +1,17 @@
-use crate::utils::{bench::bench_seconds, union_find::UnionFind};
-
 use super::*;
+use crate::utils::{bench::bench_seconds, union_find::UnionFind};
 use std::time::Duration;
 
-pub fn default_engine(_circuit: &CircuitImage) -> impl CircuitEngine + 'static {
-    CircuitEngineDfs::default()
+mod engine_llvm;
+pub use engine_llvm::*;
+
+pub fn default_engine(circuit: &CircuitImage) -> impl CircuitEngine + 'static {
+    CircuitEngineLlvm::new(circuit)
 }
 
-pub fn all_engines(_circuit: &CircuitImage) -> SmallVec<Box<dyn CircuitEngine>, 16> {
+pub fn all_engines(circuit: &CircuitImage) -> SmallVec<Box<dyn CircuitEngine>, 16> {
     SmallVec::from_buf([
+        Box::new(CircuitEngineLlvm::new(circuit)),
         Box::new(CircuitEngineDfs::default()),
         Box::new(CircuitEngineUf::default()),
     ])
