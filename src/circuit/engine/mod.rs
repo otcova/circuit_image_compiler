@@ -30,12 +30,7 @@ pub trait CircuitEngine: Send {
     fn clone_dyn(&self) -> Box<dyn CircuitEngine>;
 
     /// Crates a new engine for another circuit with the configuration of Self.
-    fn new_dyn(&self, circuit: &CircuitImage) -> Box<dyn CircuitEngine> {
-        // Most engines do not depend on the circuit
-        let _ = circuit;
-
-        self.clone_dyn()
-    }
+    fn new_dyn(&self, circuit: &CircuitImage) -> Box<dyn CircuitEngine>;
 
     /// Use tick_n for faster iteration
     fn tick(&mut self, state: &mut CircuitState);
@@ -141,6 +136,10 @@ impl CircuitEngine for CircuitEngineUf {
         "Union-Find"
     }
 
+    fn new_dyn(&self, _circuit: &CircuitImage) -> Box<dyn CircuitEngine> {
+        Box::new(Self::default())
+    }
+
     fn clone_dyn(&self) -> Box<dyn CircuitEngine> {
         Box::new(Self::default())
     }
@@ -221,6 +220,10 @@ pub struct CircuitEngineDfs {
 impl CircuitEngine for CircuitEngineDfs {
     fn name(&self) -> &'static str {
         "DFS"
+    }
+
+    fn new_dyn(&self, _circuit: &CircuitImage) -> Box<dyn CircuitEngine> {
+        Box::new(Self::default())
     }
 
     fn clone_dyn(&self) -> Box<dyn CircuitEngine> {

@@ -27,6 +27,10 @@ impl CircuitEngine for CircuitEngineLlvm {
         "DFS LLVM"
     }
 
+    fn new_dyn(&self, circuit: &CircuitImage) -> Box<dyn CircuitEngine> {
+        Box::new(Self::new(circuit))
+    }
+
     fn clone_dyn(&self) -> Box<dyn CircuitEngine> {
         Box::new(self.clone())
     }
